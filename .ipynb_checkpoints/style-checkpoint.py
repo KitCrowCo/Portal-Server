@@ -382,8 +382,7 @@ class UI:
     _TREE_SKIP_SUFFIXES = frozenset({".bak", ".pyc", ".pyo"})
 
     @staticmethod
-    @staticmethod
-    def tree(items=None, path=None, selected=None, active=None, post_url=None, target=None, swap="outerHTML", rel_to=None, depth=0, extra_vals=None, selectable=False, mode="file", options=None, visible_fn=None, label_fn=None, **kwargs) -> str:
+    def tree(items=None, path=None, selected=None, active=None, post_url=None, target=None, swap="outerHTML", rel_to=None, depth=0, extra_vals=None, selectable=False, mode="file", options=None, visible_fn=None, **kwargs) -> str:
         """Filesystem tree relying strictly on absolutely resolved in-memory registry slices. Zero disk I/O."""
         options = options or {}
         active = active if isinstance(active, (set, frozenset)) else ({active} if active else set())
@@ -432,11 +431,11 @@ class UI:
                                        {cb}
                                        <span class="tree-caret" style="opacity:.5;flex-shrink:0;font-size:.5rem;display:inline-block;transition:transform .12s">&#x25B6;</span>
                                        <span style="flex-shrink:0">{UI._TREE_ICON_FOLDER}</span>
-                                       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">{UI.escape(label_fn(child_node["name"]) if label_fn else child_node["name"])}</span>
+                                       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">{UI.escape(child_node["name"])}</span>
                                        {count}
                                        {ctx_btn}
                                     </summary>
-                                    {UI.tree(path=child_abs_str, selected=selected, active=active, post_url=post_url, target=target, swap=swap, rel_to=rel_to_obj, depth=depth+1, extra_vals=extra_vals, selectable=selectable, mode="file", visible_fn=visible_fn, label_fn=label_fn, context_menu_url=ctx_url)}
+                                    {UI.tree(path=child_abs_str, selected=selected, active=active, post_url=post_url, target=target, swap=swap, rel_to=rel_to_obj, depth=depth+1, extra_vals=extra_vals, selectable=selectable, mode="file", visible_fn=visible_fn, context_menu_url=ctx_url)}
                                 </details>"""
                 else:
                     icon = UI._TREE_ICONS.get(child_node.get("suffix", ""), UI._TREE_ICON_DEFAULT)
@@ -446,7 +445,7 @@ class UI:
                     size_str = f"{size_val//1024:.0f}K" if size_val >= 1024 else f"{size_val}B"
                     out += f"""<div class="tree-fs-row {"tree-active" if is_active else ""}" style="cursor:pointer;padding:.1rem .3rem .1rem {pl};display:flex;align-items:center;gap:.28rem;font-size:.7rem;border-bottom:var(--border-thick) solid var(--border)" {row_hx}>
                                    {cb}
-                                   <span style="flex:1;color:{"var(--accent)" if rel_str in selected else "var(--text)"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{icon} {UI.escape(label_fn(child_node["name"]) if label_fn else child_node["name"])}</span>
+                                   <span style="flex:1;color:{"var(--accent)" if rel_str in selected else "var(--text)"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{icon} {UI.escape(child_node["name"])}</span>
                                    <span style="flex-shrink:0;color:var(--text_muted);font-size:.63rem">{size_str}</span>
                                    {ctx_btn}
                                </div>"""

@@ -210,8 +210,7 @@ MD_LIVE_EDIT_INIT_JS = """
             var did = shell.id.slice('editor-shell-'.length);
             var ta = document.getElementById('doc-textarea-'+did);
             if (!ta || ta.cm) return;
-            var cm = CodeMirror.fromTextArea(ta, {lineNumbers:false, lineWrapping:true, mode:null, theme:'default'});
-            cm.getWrapperElement().classList.add('cm-live-edit');
+            var cm = CodeMirror.fromTextArea(ta, {lineNumbers:false, lineWrapping:true, mode:null, viewportMargin:Infinity, theme:'default'});
             MD_LIVE.attach(cm);
             cm.on('change', function(){
                 cm.save();
@@ -231,7 +230,7 @@ const MD_LIVE = (() => {
     function overlay() {
         return {
             token: function(stream) {
-                if (stream.sol()) { var h = stream.match(/^(#{1,6})\\s+/); if (h) { stream.skipToEnd(); return 'md-heading md-h' + h[1].length; }}
+                if (stream.match(/^#{1,6} /)) return 'md-marker md-heading';
                 if (stream.match(/^\\*\\*[^*\\n]+\\*\\*/)) return 'md-strong';
                 if (stream.match(/^\\*[^*\\n]+\\*/)) return 'md-em';
                 if (stream.match(/^`[^`\\n]+`/)) return 'md-code';
@@ -250,23 +249,11 @@ const MD_LIVE = (() => {
 
 MD_LIVE_CSS = """
 .cm-md-marker{opacity:.4;}
-.cm-md-heading{font-weight:700;}
-.cm-md-h1{font-size:1.7em;}
-.cm-md-h2{font-size:1.4em;}
-.cm-md-h3{font-size:1.2em;}
-.cm-md-h4{font-size:1.1em;}
-.cm-md-h5{font-size:1.02em;}
-.cm-md-h6{font-size:1em;opacity:.85;}
+.cm-md-heading{font-weight:700;font-size:1.15em;}
 .cm-md-strong{font-weight:700;}
 .cm-md-em{font-style:italic;}
-.cm-md-code{font-family:var(--font-mono); background:var(--surface); border-radius:.2rem;padding:0 .15rem;}
-.cm-md-link{color:var(--accent); text-decoration:underline;}
-"""
-
-MD_LIVE_EDIT_CSS = """
-.editor-main-container .cm-live-edit.CodeMirror { font-family: var(--font-main) !important; font-size: var(--font-size) !important; flex: 1; width: 100%; height: 100% !important; }
-.cm-live-edit .CodeMirror-line, .cm-live-edit .CodeMirror-lines { font-family: var(--font-main) !important; }
-.cm-live-edit .CodeMirror-scroll { min-height: 100%; }
+.cm-md-code{font-family:var(--font-mono);background:var(--surface);border-radius:.2rem;padding:0 .15rem;}
+.cm-md-link{color:var(--accent);text-decoration:underline;}
 """
 
 MD_LATEX_INIT_JS = """
@@ -340,6 +327,11 @@ def md_plus_transpiler(text: str, mode: str = "extended", fix_mojibake: bool = T
     _code_blocks: list[str] = []
     def _stash_block(html_str): _code_blocks.append(html_str); return f"\x00CODE{len(_code_blocks)-1}\x00"
 
+    # def _details_block(m):
+    #     title, inner = m.group(1).strip() or "Details", m.group(2)
+    #     rendered = md_plus_transpiler(inner, mode=mode, fix_mojibake=False, code_mirror=code_mirror, loose_breaks=loose_breaks, enable_graphviz=enable_graphviz, enable_latex=enable_latex, theme=theme, **kwargs)
+    #     return _stash_block(f'<details class="md-details"><summary>{UI.escape(title)}</summary><div class="md-details-body">{rendered}</div></details>')
+    # text = re.sub(r'^:::details[ \t]*([^\n]*)\n(.*?)\n:::[ \t]*$', _details_block, text, flags=re.M | re.S)
     _DETAILS_OPEN  = re.compile(r'^:::details[ \t]*(.*)$')
     _DETAILS_CLOSE = re.compile(r'^:::[ \t]*$')
 
@@ -464,6 +456,43 @@ def md_plus_transpiler(text: str, mode: str = "extended", fix_mojibake: bool = T
             pos = b.end() if (b and _tabset_end_re.match(text, b.start())) else body_end
         out.append(text[pos:])
         text = "".join(out)
+    
+    # # --- Server-side Tabset Compiler (Zero JS) ---
+    # # Processed deepest level first so a nested tabset's marker line becomes an opaque stashed token before the enclosing (shallower) level's boundary search runs against it.
+    # # Boundary = next header at this level or shallower (a level-3 tabset closes at the next H1, H2, or H3).
+    # tabset_counter = [0]
+    # doc_prefix = doc_id if doc_id else "static"
+    # for level in range(5, 0, -1):
+    #     hashes = '#' * level
+    #     marker_re = re.compile(rf'^{hashes}[ \t]+(.*?)[ \t]+\{{\.tabset\}}[ \t]*$\n?', re.M)
+    #     boundary_re = re.compile(rf'^#{{1,{level}}}[ \t]', re.M)
+    #     out, pos = [], 0
+    #     for m in marker_re.finditer(text):
+    #         if m.start() < pos: continue  # falls inside a block this pass already consumed
+    #         out.append(text[pos:m.start()])
+    #         body_start = m.end()
+    #         b = boundary_re.search(text, body_start)
+    #         body_end = b.start() if b else len(text)
+    #         inner_content = text[body_start:body_end]
+    #         child_hashes = '#' * (level + 1)
+    #         parts = re.split(rf'^{child_hashes}[ \t]+(.+)$', inner_content, flags=re.M)
+    #         if len(parts) < 3: out.append(text[m.start():body_end]); pos = body_end; continue
+    #         t_idx = tabset_counter[0]; tabset_counter[0] += 1
+    #         html_parts = ['<div class="md-tabset">']
+    #         for child_idx, i in enumerate(range(1, len(parts), 2)):
+    #             title_str, body_str = parts[i].strip(), parts[i+1]
+    #             rendered_body = md_plus_transpiler(body_str, mode=mode, fix_mojibake=False, code_mirror=code_mirror, loose_breaks=loose_breaks, enable_graphviz=enable_graphviz, enable_latex=enable_latex, theme=theme, **kwargs)
+    #             # rendered_body = md_plus_transpiler(body_str, mode=mode, fix_mojibake=False, code_mirror=code_mirror, loose_breaks=loose_breaks, enable_graphviz=enable_graphviz, enable_latex=enable_latex, theme=theme, hidden_tasks=hidden_tasks, task_deletable=task_deletable, **kwargs)
+    #             tab_id, group_name = f"tab-{doc_prefix}-{t_idx}-{child_idx}", f"tabset-{doc_prefix}-{t_idx}"
+    #             clean_title = re.sub(r'\{[#\.][\w-]+\}', '', title_str).strip()
+    #             html_parts.append(f'<input type="radio" id="{tab_id}" name="{group_name}"{" checked" if child_idx == 0 else ""}>')
+    #             html_parts.append(f'<label class="md-tab-btn" for="{tab_id}">{clean_title}</label>')
+    #             html_parts.append(f'<div class="md-tab-pane">{rendered_body}</div>')
+    #         html_parts.append('</div>')
+    #         out.append(_stash_block("\n".join(html_parts)))
+    #         pos = body_end
+    #     out.append(text[pos:])
+    #     text = "".join(out)
 
     for n in range(6, 0, -1):
         hashes = '#' * n
@@ -1004,6 +1033,10 @@ class ChatManager:
         self.bubble_me_border = kwargs.get('bubble_me_border', 'rgba(0, 180, 255, .4)')
         self.bubble_other_bg = kwargs.get('bubble_other_bg', 'var(--glass)')
         self.bubble_other_border = kwargs.get('bubble_other_border', 'var(--border)')
+        # self.bubble_me_bg = kwargs.get('bubble_me_bg', '#FFE8F6' ) #'rgba(0, 160, 220, .18)')
+        # self.bubble_me_border = kwargs.get('bubble_me_border', "#B2DFED") #'rgba(0, 180, 255, .4)')
+        # self.bubble_other_bg = kwargs.get('bubble_other_bg', 'var(--glass)')
+        # self.bubble_other_border = kwargs.get('bubble_other_border', 'var(--border)')
 
         self.branch_id = kwargs.get('branch_id', '')
         self.nesting_level = kwargs.get('nesting_level', 1)
@@ -1110,7 +1143,7 @@ class ChatManager:
         """Self-contained, runtime handler execution route. Operates agnostically using the IDs provided dynamically by the Interface Bridge form layout extraction."""
         sid = payload.get("cid") or payload.get("branch")
         user_input = payload.get("content", "").strip()
-        if not user_input: return imr  # Stop executing early on empty actions
+        # if not user_input: return imr  # Stop executing early on empty actions
         working_indicator = self.working_html(sid=sid, stop_url=f"{self.base_url}/msg/stop/{sid}" if self.base_url else "") # Flip on the loader spinner using the instance's own component rendering patterns
         imr.oob(working_indicator, element_id=f"cm-work-{sid}", swap="outerHTML")
         is_streaming = payload.get("stream") == "1"
@@ -1210,11 +1243,9 @@ function peDownload(did, filename) {
 }
 function pePrint(did) {
     var prev = document.getElementById('editor-preview-'+did);
-    var titleEl = document.getElementById('doc-title-'+did);
-    var docTitle = (titleEl ? titleEl.value : 'Document').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var html = prev ? prev.innerHTML : ((document.getElementById('doc-textarea-'+did)||{}).value || '');
     var w = window.open('', '_blank');
-    w.document.write('<html><head><title>'+docTitle+'</title></head><body>'+html+'</body></html>');
+    w.document.write('<html><head><title>Print</title></head><body>'+html+'</body></html>');
     w.document.close(); w.focus(); w.print();
 }
 window.addEventListener('beforeunload', function(e) {
@@ -1242,7 +1273,7 @@ class PortalEditor:
     .editor-bottombar{border-top:var(--border-thick) solid var(--border); padding:.3rem .5rem; gap:.3rem; flex-wrap:wrap; align-items:center; background:var(--bg_panel); flex-shrink:0;}
     .search-input-field{background:var(--surface); color:var(--text); border:var(--border-thick) solid var(--border); border-radius:calc(var(--radius)/2); padding:0.3rem 0.5rem; font-family:inherit; outline:none;}
     .search-input-field:focus{border-color:var(--accent);}
-    """ + MD_BLOCK_CSS + CODE_MIRROR_THEME_CSS + MD_LIVE_CSS + MD_LIVE_EDIT_CSS
+    """ + MD_BLOCK_CSS + CODE_MIRROR_THEME_CSS + MD_LIVE_CSS
 
     def __init__(self, base_url: str, autosave_delay: str = "2000ms", enable_ai: bool = False, enable_graphviz: bool = True, IM = None, intent_prefix: str = "portal", nesting_level: int = 1, file_manager: "FileManager" = None, get_tab = None, theme: dict = None, render_kwargs_fn = None):
         self.base_url = base_url.rstrip("/")
@@ -1741,6 +1772,9 @@ class FileManager:
         out = [self.move(rel, dest_dir_rel) for rel in rels if self.resolve(rel).exists()]
         if out: self._trigger_change(rels + out, "modified")
         return out
+
+    # @router.post("/rescan")
+    # async def force_rescan(): _GLOBAL_WATCHDOG.initial_baseline_crawl(); return HTMLResponse("&#x2713;")
 
     def folder_picker_html(self, selected: str = "", filter_fn = None) -> str:
         """Radio-button folder tree for 'pick a destination' UIs. Rooted at self.root. Now built on the shared UI.list_children walker - the previous version called filter_fn(rel) on the PARENT directory instead of each candidate child, and aborted the whole walk on the first excluded folder instead of skipping just that one (debug print included). Both were real bugs, not just style issues."""

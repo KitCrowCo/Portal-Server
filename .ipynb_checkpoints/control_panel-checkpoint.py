@@ -34,7 +34,9 @@ def _field(label, input_html): return f'<div>{_label(label)}{input_html}</div>'
 def _btn(label, style="", type_="submit"): return f'<button type="{type_}" class="button" style="{style}">{label}</button>'
 def _select(name, options_html, extra_style=""): return f'<select name="{name}" style="background:var(--bg); border:var(--border-thick) solid var(--border); color:var(--text); padding:0.45rem; border-radius:var(--radius); width:100%;{extra_style}">{options_html}</select>'
 
-def _valid_folder(base_dir, name): return os.path.isdir(os.path.join(base_dir, name)) and re.fullmatch(r"^(?![\._])[a-zA-Z0-9\-_ ]+$", name) #True if name is a loadable module/tool - not hidden, not __pycache__, matches identifier pattern.
+def _valid_folder(base_dir, name):
+    """True if name is a loadable module/tool - not hidden, not __pycache__, matches identifier pattern."""
+    return os.path.isdir(os.path.join(base_dir, name)) and re.fullmatch(r"^(?![\._])[a-zA-Z0-9\-_ ]+$", name)
 
 def try_send_ws(notification: Notification):
     payload = {"type": "broadcast", "title": notification.title, "message": notification.message, "payload": json.loads(notification.payload or "{}")}
@@ -126,7 +128,7 @@ def cp_users_fragment(db=Depends(get_db), admin=Depends(get_current_user)):
     users = db.query(User).order_by(User.username).all()
     role_opts = lambda cur: "".join(f'<option value="{r}"{"selected" if cur==r else ""}>{r}</option>' for r in ("user","admin","moderator","guest"))
     rows = "".join(f"""
-      <tr style="border-bottom:var(--border-bottom) solid var(--border);">
+      <tr style="border-bottom:1px solid var(--border);">
         <td style="padding:0.4rem 0.5rem;">{u.username}</td>
         <td style="padding:0.4rem 0.5rem;color:var(--text_muted);font-size:0.8rem;">{u.role}</td>
         <td style="padding:0.4rem 0.5rem;">
@@ -146,13 +148,13 @@ def cp_users_fragment(db=Depends(get_db), admin=Depends(get_current_user)):
     return HTMLResponse(f"""
     <h3 style="margin-top:0;">User Management</h3>
     <form hx-post="{_pre}/users/add" hx-target="#cp-content" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:1.5rem;">
-      <div style="flex:1;min-width:11rem;">{_field("Username", _input("username","Username"))}</div>
-      <div style="flex:1;min-width:11rem;">{_field("Password", _input("password","Password","password"))}</div>
+      <div style="flex:1;min-width:110px;">{_field("Username", _input("username","Username"))}</div>
+      <div style="flex:1;min-width:110px;">{_field("Password", _input("password","Password","password"))}</div>
       <div>{_field("Role", _select("role",'<option value="user">User</option><option value="admin">Admin</option>','width:auto;'))}</div>
       <div style="padding-bottom:0.1rem;">{_btn("Add")}</div>
     </form>
     <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
-      <tr style="color:var(--text_muted);border-bottom:var(--border-bottom) solid var(--border);text-align:left;">
+      <tr style="color:var(--text_muted);border-bottom:1px solid var(--border);text-align:left;">
         <th style="padding:0.4rem 0.5rem;">User</th><th>Role</th><th>Actions</th>
       </tr>{rows}
     </table>""")
@@ -256,10 +258,10 @@ def cp_notifications_fragment(db=Depends(get_db), user=Depends(get_current_user)
 
     q = db.query(Notification).order_by(Notification.created_at.desc()).limit(30).all()
     history = "".join(f"""
-      <div style="padding:0.5rem 0.7rem;border-bottom:var(--border-bottom) solid var(--border);font-size:0.8rem;">
+      <div style="padding:0.5rem 0.7rem;border-bottom:1px solid var(--border);font-size:0.8rem;">
         <div style="display:flex;justify-content:space-between;gap:0.5rem;">
           <b style="color:var(--text);">{n.title or "(no title)"}</b>
-          <span style="font-size:0.65rem;white-space:nowrap;color:{'var(--accent)' if n.sent else 'var(--text_muted)'};">{'msg sent' if n.sent else 'queued'}</span>
+          <span style="font-size:0.65rem;white-space:nowrap;color:{'var(--accent)' if n.sent else 'var(--text_muted)'};">{'╬ô┬ú├┤ sent' if n.sent else 'queued'}</span>
         </div>
         <div style="color:var(--text_muted);margin:0.2rem 0;font-size:0.78rem;">{n.message}</div>
         <div style="font-size:0.65rem;color:var(--text_muted);display:flex;justify-content:space-between;">
@@ -275,17 +277,17 @@ def cp_notifications_fragment(db=Depends(get_db), user=Depends(get_current_user)
     <div class="glass" style="padding:1rem;margin-bottom:1.5rem;border-radius:var(--radius);">
       <form hx-post="{_pre}/notify" hx-target="#notify-result" style="display:flex;flex-direction:column;gap:0.7rem;">
         <div style="display:flex;gap:0.7rem;flex-wrap:wrap;">
-          <div style="flex:1;min-width:13rem;">{_field("Recipient", _select("recipient", user_opts))}</div>
-          <div style="flex:1;min-width:13rem;">{_field("Or by role", _select("recipient_role", role_opts))}</div>
+          <div style="flex:1;min-width:130px;">{_field("Recipient", _select("recipient", user_opts))}</div>
+          <div style="flex:1;min-width:130px;">{_field("Or by role", _select("recipient_role", role_opts))}</div>
         </div>
         {_field("Title", _input("title","Short subject line"))}
-        <div>{_label("Message")}<textarea name="message" placeholder="Body text - " style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.45rem;border-radius:var(--radius);width:100%;min-height:7rem;box-sizing:border-box;font-family:inherit;resize:vertical;"></textarea></div>
+        <div>{_label("Message")}<textarea name="message" placeholder="Body text╬ô├ç┬¬" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.45rem;border-radius:var(--radius);width:100%;min-height:70px;box-sizing:border-box;font-family:inherit;resize:vertical;"></textarea></div>
         {_btn("Send Notification", "align-self:flex-start;")}
         <div id="notify-result" style="font-size:0.8rem;min-height:1.2rem;"></div>
       </form>
     </div>
-    <h4 style="color:var(--text_muted);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.1rem;margin:0 0 0.5rem;">Recent</h4>
-    <div style="border:var(--border-thick) solid var(--border);border-radius:var(--radius);overflow:hidden;max-height:38rem;overflow-y:auto;">{history}</div>""")
+    <h4 style="color:var(--text_muted);font-size:0.72rem;text-transform:uppercase;letter-spacing:1px;margin:0 0 0.5rem;">Recent</h4>
+    <div style="border:var(--border-thick) solid var(--border);border-radius:var(--radius);overflow:hidden;max-height:380px;overflow-y:auto;">{history}</div>""")
 
 @router.post("/notify", response_class=HTMLResponse)
 def cp_notify(recipient: str = Form("all"), recipient_role: str = Form(""), title: str = Form(...), message: str = Form(...), db=Depends(get_db), user=Depends(get_current_user)):
@@ -309,50 +311,35 @@ async def cp_notifications_push(request: Request, db=Depends(get_db), user=Depen
 
 # --- External Links ---
 
+# Expand for additional Links **************************************************************************************************
+
 @router.get("/ext-links", response_class=HTMLResponse)
-async def cp_ext_links(request: Request, user=Depends(get_current_user)):
+def cp_ext_links(db: Session = Depends(get_db), user=Depends(get_current_user)):
     if user.role != "admin": return HTMLResponse("Unauthorized")
-    links = await get_state(request, scope="single", namespace="_portal", key="ext_links") or []
-    rows = "".join(f"""<div class="ext-link-row" style="display:grid;grid-template-columns:2fr 3fr 1fr 3rem;gap:0.5rem;padding:0.3rem 0;align-items:center;">
-        <input type="text" class="el-label" value="{UI.escape(l.get('label',''))}" placeholder="Display name" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem;border-radius:var(--radius);">
-        <input type="text" class="el-url" value="{UI.escape(l.get('url',''))}" placeholder="http://host:port" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem;border-radius:var(--radius);">
-        <input type="text" class="el-icon" value="{UI.escape(l.get('icon','&#x1F310;'))}" placeholder="&amp;#xNNNN;" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem;border-radius:var(--radius);">
-        <button type="button" onclick="this.closest('.ext-link-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;">&#x2715;</button>
-    </div>""" for l in links)
+    gitea = db.query(UIString).filter(UIString.key == "ext_gitea_url").first()
+    wikijs = db.query(UIString).filter(UIString.key == "ext_wikijs_url").first()
     return HTMLResponse(f"""<h3 style="margin-top:0;">External Links</h3>
         <p style="color:var(--text_muted); font-size:0.8rem; margin-bottom:1rem;">
-            Any internal service, shown as a nav shortcut and opened as an embedded frame. Include the full address and port (e.g. <code>http://192.168.1.10:3000</code>). Services that refuse to be framed (X-Frame-Options) open in a new tab instead.
+            URLs for internal services shown in the dashboard nav. Opened as embedded frames inside the portal.<br>
+            Use the full address including port (e.g. <code>http://192.168.1.10:3000</code>).
+            If the service refuses to be framed (X-Frame-Options), it will open in a new browser tab instead.
         </p>
-        <div id="ext-link-rows">{rows}</div>
-        <button type="button" class="ui-btn" style="margin-top:0.5rem;" onclick="extLinkAddRow()">+ Add Link</button>
-        <button type="button" class="ui-btn" style="margin-top:1rem;display:block;" onclick="extLinkSave()">Save</button>
-        <div id="ext-result" style="font-size:0.8rem;margin-top:0.5rem;min-height:1rem;"></div>
-        <script>
-        function extLinkAddRow(){{
-            document.getElementById('ext-link-rows').insertAdjacentHTML('beforeend', `<div class="ext-link-row" style="display:grid;grid-template-columns:2fr 3fr 1fr 3.2rem;gap:0.5rem;padding:0.3rem 0;align-items:center;">
-                <input type="text" class="el-label" placeholder="Display name" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem;border-radius:var(--radius);">
-                <input type="text" class="el-url" placeholder="http://host:port" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem;border-radius:var(--radius);">
-                <input type="text" class="el-icon" value="&amp;#x1F310;" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem;border-radius:var(--radius);">
-                <button type="button" onclick="this.closest('.ext-link-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;">&#x2715;</button>
-            </div>`);
-        }}
-        async function extLinkSave(){{
-            const rows = Array.from(document.querySelectorAll('#ext-link-rows .ext-link-row')).map(r => ({{
-                label: r.querySelector('.el-label').value.trim(),
-                url: r.querySelector('.el-url').value.trim(),
-                icon: r.querySelector('.el-icon').value.trim() || '&#x1F310;',
-                id: (r.querySelector('.el-label').value.trim() || 'link').toLowerCase().replace(/[^a-z0-9]/g,'-')
-            }})).filter(l => l.label && l.url);
-            const r = await fetch('{_pre}/ext-links/save', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(rows)}});
-            document.getElementById('ext-result').innerHTML = r.ok ? "<span style='color:var(--accent);'>&#x2713; Saved. Reload dashboard to see changes.</span>" : "<span style='color:#ff5f5f;'>Save failed.</span>";
-        }}
-        </script>""")
+        <form hx-post="{_pre}/ext-links/save" hx-target="#ext-result" style="display:flex;flex-direction:column;gap:0.8rem;max-width:420px;">
+          {_field("Gitea URL", _input("ext_gitea_url", "http://192.168.x.x:3000", value=gitea.value if gitea else ""))}
+          {_field("WikiJS URL", _input("ext_wikijs_url", "http://192.168.x.x:3001", value=wikijs.value if wikijs else ""))}
+          {_btn("Save")}
+          <div id="ext-result" style="font-size:0.8rem;min-height:1rem;"></div>
+        </form>""")
 
-@router.post("/ext-links/save")
-async def cp_ext_links_save(request: Request, links: list = Body(...), user=Depends(get_current_user)):
-    if user.role != "admin": raise HTTPException(403)
-    await set_state(request, links, scope="single", namespace="_portal", key="ext_links")
-    return {"status": "ok"}
+@router.post("/ext-links/save", response_class=HTMLResponse)
+async def cp_ext_links_save(request: Request, ext_gitea_url: str = Form(""), ext_wikijs_url: str = Form(""), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if user.role != "admin": return HTMLResponse("Unauthorized")
+    for key, val in [("ext_gitea_url", ext_gitea_url.strip()), ("ext_wikijs_url", ext_wikijs_url.strip())]:
+        row = db.query(UIString).filter(UIString.key == key).first()
+        if row: row.value = val
+        else: db.add(UIString(key=key, value=val))
+    db.commit()
+    return HTMLResponse("<span style='color:var(--accent);'>&#x2713; Saved. Reload to see links in nav.</span>")
 
 # --- Appearance ---
 
@@ -377,9 +364,9 @@ def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_curre
         badge      = f'<span style="font-size:0.6rem;color:{"var(--accent)" if is_system else "var(--text_muted)"};opacity:0.8;">{"sys" if is_system else "custom"}</span>'
         input_type = "color" if str(value).startswith("#") else "text"
         readonly   = 'readonly style="opacity:0.55;"' if is_system else ""
-        color_style = "width:3.8rem;height:3rem;padding:.2rem;cursor:pointer;border-radius:.4rem;" if input_type == "color" else "display:none;"
+        color_style = "width:38px;height:30px;padding:2px;cursor:pointer;border-radius:4px;" if input_type == "color" else "display:none;"
         rows_html += f"""
-        <div class="theme-row" style="display:grid;grid-template-columns:1fr 1.5fr 3.2rem;gap:0.7rem;align-items:center;padding:0.4rem 0.5rem;border-bottom:var(--border-bottom) solid var(--border);">
+        <div class="theme-row" style="display:grid;grid-template-columns:1fr 1.5fr 32px;gap:0.7rem;align-items:center;padding:0.4rem 0.5rem;border-bottom:1px solid var(--border);">
           <div style="display:flex;flex-direction:column;gap:0.1rem;">{badge}<input type="text" class="key-input" value="{key}" {readonly} style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;font-family:monospace;width:100%;box-sizing:border-box;"></div>
           <div style="display:flex;gap:0.4rem;align-items:center;">
             <input type="{input_type}" value="{value}" oninput="this.nextElementSibling.value=this.value" style="{color_style}">
@@ -397,11 +384,11 @@ def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_curre
         <input type="file" id="theme-upload" style="display:none" accept=".json" onchange="uploadTheme(this)">
       </div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1.5fr 3.2rem;gap:0.7rem;padding:0.3rem 0.5rem;font-size:0.7rem;color:var(--text_muted);text-transform:uppercase;letter-spacing:0.05rem;border-bottom:var(--border-bottom) solid var(--border);margin-bottom:0.3rem;">
+    <div style="display:grid;grid-template-columns:1fr 1.5fr 32px;gap:0.7rem;padding:0.3rem 0.5rem;font-size:0.7rem;color:var(--text_muted);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);margin-bottom:0.3rem;">
       <div>Variable</div><div>Value</div><div></div>
     </div>
     <div id="theme-editor-list" style="max-height:42vh;overflow-y:auto;">{rows_html}</div>
-    <div style="display:flex;gap:0.5rem;margin-top:0.8rem;padding:0.8rem;border:.2rem dashed var(--border);border-radius:var(--radius);">
+    <div style="display:flex;gap:0.5rem;margin-top:0.8rem;padding:0.8rem;border:2px dashed var(--border);border-radius:var(--radius);">
       <input type="text" id="new-key-name" placeholder="variable_name" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);min-width:0;">
       <input type="text" id="new-key-val"  placeholder="#hex or value"  style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);min-width:0;">
       <button type="button" class="button" onclick="addRow()">Add</button>
@@ -424,9 +411,9 @@ def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_curre
         const k=document.getElementById('new-key-name'),v=document.getElementById('new-key-val');
         if(!k.value.trim()) return;
         const isColor=v.value.startsWith('#');
-        const cs=isColor?'width:3.8rem;height:3rem;padding:.2rem;cursor:pointer;border-radius:.4rem;':'display:none;';
+        const cs=isColor?'width:38px;height:30px;padding:2px;cursor:pointer;border-radius:4px;':'display:none;';
         document.getElementById('theme-editor-list').insertAdjacentHTML('beforeend',`
-          <div class="theme-row" style="display:grid;grid-template-columns:1fr 1.5fr 3.2rem;gap:0.7rem;align-items:center;padding:0.4rem 0.5rem;border-bottom:var(--border-bottom) solid var(--border);">
+          <div class="theme-row" style="display:grid;grid-template-columns:1fr 1.5fr 32px;gap:0.7rem;align-items:center;padding:0.4rem 0.5rem;border-bottom:1px solid var(--border);">
             <div style="display:flex;flex-direction:column;gap:0.1rem;"><span style="font-size:0.6rem;color:var(--text_muted);">custom</span><input type="text" class="key-input" value="\${{k.value}}" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;font-family:monospace;width:100%;box-sizing:border-box;"></div>
             <div style="display:flex;gap:0.4rem;align-items:center;"><input type="color" value="\${{isColor?v.value:'#ffffff'}}" oninput="this.nextElementSibling.value=this.value" style="\${{cs}}"><input type="text" value="\${{v.value}}" class="val-input" oninput="this.previousElementSibling.value=this.value" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;min-width:0;"></div>
             <button type="button" onclick="this.closest('.theme-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;padding:0;">&#x2715;</button>
@@ -492,8 +479,8 @@ async def cp_theme_module_default_save(module_ns: str, config: dict = Body(...),
     return {"status": "ok"}
 
 @router.get("/theme/module-user/{module_ns}", response_class=HTMLResponse)
-async def cp_theme_module_user(module_ns: str, request: Request, user=Depends(get_current_user)):
-    current = await resolve_theme_full(request, module_ns=module_ns)
+async def cp_theme_module_user(module_ns: str, request: Request, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    current = await resolve_theme_full(request, db, module_ns=module_ns)
     extra = f'''<button type="button" class="button" style="width:100%;background:var(--bg_panel);" onclick="if(confirm('Remove your override and use the default for this module?')) fetch('{_pre}/theme/module-user/{module_ns}/clear',{{method:'POST'}}).then(()=>window.location.reload())">&#x21BA; Clear override</button>'''
     return HTMLResponse(UI.theme_editor_panel(current, save_url=f"{_pre}/theme/module-user/{module_ns}/save", title=f"My Theme Override: {module_ns}", extra_actions=extra))
 

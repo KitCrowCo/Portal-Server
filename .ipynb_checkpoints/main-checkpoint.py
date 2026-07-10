@@ -1,5 +1,5 @@
 # main.py
-import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading, pathlib, shutil
+import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading
 from contextlib import contextmanager
 from urllib.parse import quote
 from fastapi import FastAPI, Request, Depends, HTTPException, Form, Response, WebSocket, status, Body
@@ -48,9 +48,6 @@ set_cp_templates(templates)
 # All Data goes here
 os.makedirs("./data", exist_ok=True)
 os.makedirs("./data/_common", exist_ok=True)
-INFO_SRC = pathlib.Path("./core_files/static/information")
-INFO_DST = pathlib.Path("./data/_common/Information")
-
 
 # -- Startup --
 
@@ -76,18 +73,6 @@ def startup_db_check(db = Depends(get_db)):
         if not db.query(ServerState).first():
             db.add(ServerState(state={}))
             db.commit()
-
-def sync_information_docs():
-    """Copies bundled getting-started/about docs into the wiki's shared root on every startup.
-    Overwrites only if content differs, so a user's own edits inside data/_common/Information survive restarts unless the shipped doc itself changed."""
-    if not INFO_SRC.exists(): return
-    INFO_DST.mkdir(parents=True, exist_ok=True)
-    for f in INFO_SRC.glob("*.md"):
-        dest = INFO_DST / f.name
-        src_text = f.read_text(encoding="utf-8")
-        if not dest.exists() or dest.read_text(encoding="utf-8") != src_text: dest.write_text(src_text, encoding="utf-8")
-
-sync_information_docs()
 
 # -- Middleware --
 
@@ -213,8 +198,7 @@ def load_modules(module_type="module"):
             if os.path.exists(f"{module_path}/static"):
                 os.makedirs(f"./data/{item}/static", exist_ok = True)
                 app.mount(f"/{module_type}s/_assets_{item}", StaticFiles(directory=f"./data/{item}/static"),  name=f"{module_type}_assets_{item}")
-            public_deps = {"templates": templates, "theme": active_theme.config if active_theme else {}, "tools": Tools, "resolve_theme": resolve_theme_full, "get_state": get_state}
-            load_server_router(module_path, item, prefix=module_type, dependencies=public_deps, router_type=module_type, path_modifier="public", verbose=VERBOSE)
+            load_server_router(module_path, item, prefix=module_type, dependencies={}, router_type=module_type, path_modifier="public", verbose=VERBOSE)
 
 def refresh_modular_router(primary_router, middle_router_instance, prefix):
     primary_router.routes = [route for route in primary_router.routes if not route.path.startswith(prefix)]
@@ -334,9 +318,6 @@ async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)
 @app.get("/sw.js")
 async def serve_sw(): return FileResponse("./core_files/static/js/sw.js", media_type="application/javascript")
 
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon(): return FileResponse("./core_files/static/icon-192.png")
-
 # -- Home Page --
 
 async def _render_content_area(request, state): return state, f"""<div id="sub-content-area" hx-get="{state.get("tabs", {}).get(state.get("active", ""), {}).get("path", "/launcher")}" hx-trigger="load" hx-target="#content-root" hx-swap="innerHTML">Loading...</div>"""
@@ -346,9 +327,9 @@ _portal_im = InterfaceManager(nesting_level = 0, db_path="im_registry.db") # Lev
 _pre = "_portal"
 TM = bf.TabManager(namespace = "_nav", tab_bar_id = "portal-nav-bar-inner", content_id = "content-root", render_content_fn = _render_content_area, intent_prefix = _pre, IM = _portal_im, empty = {"tabs": {"launcher-0": {"id": "launcher-0", "path": "/launcher", "label": "Module Launcher", "icon": "", "order": 0}}, "active": "launcher-0"}, nesting_level = 0)
 
-# # Needs Review ********************************************************************************
-# _shell_im.scripts["set_bridge"] = [lambda request, payload, imr: _handle_bridge_state(request, payload, imr)]
-# _shell_im.scripts["set_cfg"] = [lambda request, payload, imr: _handle_cfg_state(request, payload, imr)]
+# Need Review ********************************************************************************
+_shell_im.scripts["set_bridge"] = [lambda request, payload, imr: _handle_bridge_state(request, payload, imr)]
+_shell_im.scripts["set_cfg"] = [lambda request, payload, imr: _handle_cfg_state(request, payload, imr)]
 
 async def _handle_bridge_state(request, payload, imr):
     open_val = payload.get("open", "false").lower() == "true"
@@ -367,10 +348,12 @@ async def _handle_cfg_state(request, payload, imr):
 async def dashboard(request: Request, user=Depends(get_current_user)):
     if not user: return RedirectResponse(url="/login")
     admin_link = f"""<a class='nav-link' style='background:none; border:none; text-align:left; width:100%; padding:0.5rem 0; cursor:pointer;' hx-post='/im/in' hx-target='body' hx-swap='none' hx-vals='{json.dumps({'type': f'{_pre}_open_tab', 'path': '/control-panel', 'label': 'Control Panel', 'id': 'control-panel', 'lvl': 0})}'>&#x2699; Control Panel</a>"""
-    if user.role == "admin": admin_link += f"""<button class='nav-link' style='background:none; border:none; text-align:left; width:100%; padding:0.5rem 0; cursor:pointer; color:var(--text);' hx-post='/_reset_nav_all' hx-swap='none' onclick="this.innerHTML='&#x231B; Resetting...'; setTimeout(() => this.innerHTML='&#x26A0; Reset All Navs', 2000);">&#x26A0; Reset All Navs</button>
-                                               <button class='nav-link' style='background:none; border:none; text-align:left; width:100%; padding:0.5rem 0; cursor:pointer; color:var(--text);' hx-post='/rescan' hx-swap='none' onclick="this.innerHTML='&#x231B; Scanning...'; setTimeout(() => this.innerHTML='&#x27F3; Rescan Files', 2000);">&#x27F3; Rescan Files</button>"""
-    ext_links = await get_state(request, scope="single", namespace="_portal", key="ext_links") or []
-    ext_nav = "".join(f"""<button style='background:none; border:none; text-align:left; width:100%; padding:0.5rem 0; cursor:pointer; color:var(--text);' hx-post='/im/in' hx-target='body' hx-swap='none' hx-vals='{json.dumps({"type": f"{_pre}_open_tab", "path": f"/external_frame?url={quote(l['url'], safe='')}", "label": l["label"], "id": f"ext-{l.get('id','link')}", "lvl": 0})}'>{l.get("icon","&#x1F310;")} {UI.escape(l["label"])}</button>""" for l in ext_links)
+
+    ui_data = {r.key: r.value for r in db.query(UIString).filter(UIString.key.like("ext_%")).all()}
+    ext_links = [("&#x2387; Gitea", ui_data["ext_gitea_url"], "gitea") for ]
+    if ui_data.get("ext_gitea_url"): ext_links.append(("&#x2387; Gitea", ui_data["ext_gitea_url"], "gitea"))
+    ext_nav = "".join([f"""<button style='background:none; border:none; text-align:left; width:100%; padding:0.5rem 0; cursor:pointer; color:var(--text);' hx-post='/im/in' hx-target='body' hx-swap='none' hx-vals='{json.dumps({'type': f'{_pre}_open_tab', 'path': f'/external_frame?url={url}', 'label': label, 'id': tab_id, 'lvl': 0})}'>{label}</button>""" for label, url, tab_id in ext_links])
+
     module_select = UI.dropdown(name="payload", options=[(json.dumps({'type': f'{_pre}_open_tab', 'path': f'/module/{m}/', 'label': m.replace("_", " ").title(), 'id': m.replace("_", "-")}), m.replace('_',' ').title()) for m in get_accessible_modules(user)], htmx_dict={"post": "/im/in", "target": "body", "swap": "none", "trigger": "change", "on::after-request": "this.value=''"}, default_text="Select Module&#x2026;")
     nav = f"""<nav style='flex:1;'>
                    <a href='/' class='nav-link'>&#x2302; Dashboard</a>
@@ -380,14 +363,15 @@ async def dashboard(request: Request, user=Depends(get_current_user)):
                        {module_select}
                    </label>
                    {ext_nav}
-               </nav>"""
+               </nav>
+               <div id='state_status'>none</div>"""
     state = await get_state(request, scope = "user", namespace = "_nav") or {}
     state.setdefault("tabs", {})
     state.setdefault("active", "launcher")
     state, content_area = await _render_content_area(request, state)
     nav_bar = await TM.tab_bar_fn(state, "portal-nav-bar-inner", _pre)
     top_content = f"""<div style="display:flex; flex-direction:column; height:100%;">
-                          <div style="padding:0 0.6rem; height:2rem; display:flex; align-items:center; font-size:0.5rem; color:var(--text_muted); letter-spacing:0.1rem; border-bottom:var(--border-thick) solid var(--border); flex-shrink:0;">
+                          <div style="padding:0 0.6rem; height:2rem; display:flex; align-items:center; font-size:0.4rem; color:var(--text_muted); letter-spacing:0.1rem; border-bottom:var(--border-thick) solid var(--border); flex-shrink:0;">
                               {" "*2 + SERVER_NAME}
                           </div>
                           <div id="portal-nav-bar-outer" style="flex:1; min-height:0; overflow:hidden;">{nav_bar}</div>
@@ -401,29 +385,21 @@ async def launcher(request: Request):
     global metas
     cards = UI.card("Control Panel", "&#x2699; Control Panel", htmx = {"post": '/im/in', "target": 'body', "swap": 'none', 'vals': json.dumps({"type": f"{_pre}_open_tab", "path": "/control-panel/", "label": "&#x2699; Control Panel", "id": "control-panel", "lvl": 0})})
     cards += "".join([UI.card(m.replace("_", " ").title(), " ".join([metas["module"].get(m, {}).get("icon",""), metas["module"].get(m, {}).get("description","")]), htmx = {"post": '/im/in', "target": 'body', "swap": 'none', 'vals': json.dumps({"type": f"{_pre}_open_tab", "lvl": 0, "path": f"/module/{m}/", "label": m.replace("_"," ").title(), "id": f"mod-{m}"})}) for m in get_accessible_modules(request.state.user)])
-    return HTMLResponse(f'<div style="padding:2rem; display:grid; grid-template-columns:repeat(auto-fill,minmax(18rem, 1fr)); gap:1rem;">{cards}</div>')
+    return HTMLResponse(f'<div style="padding:2rem; display:grid; grid-template-columns:repeat(auto-fill,minmax(18rem,1fr)); gap:1rem;">{cards}</div>')
 
 # -- Debug Routes --
 
 @app.post("/_reset_nav_all", response_class=HTMLResponse)
 async def reset_nav_all(request: Request, user=Depends(get_current_user), db=Depends(get_db)):
-    """Admin only: wipe _nav namespace and all module namespaces from every user's state so nobody is stuck."""
+    """Admin only: wipe _nav namespace from every user's state so nobody is stuck."""
     if user.role != "admin": return HTMLResponse("Denied", status_code=403)
-    namespaces_to_clear = ["_nav"] + list(get_accessible_modules(user))
     rows = db.query(UserState).all()
     for row in rows:
-        if row.state:
+        if row.state and "_nav" in row.state:
             s = dict(row.state)
-            cleared_any = False
-            for ns in namespaces_to_clear:
-                if ns in s:
-                    s.pop(ns, None)
-                    cleared_any = True
-            if cleared_any: row.state = s
+            s.pop("_nav", None)
+            row.state = s
     db.commit()
-    return HTMLResponse(f"<span style='color:var(--accent);'>&#x2713; Nav and Module states cleared for all users.</span>")
-
-@app.post("/rescan")
-async def force_rescan(): _GLOBAL_WATCHDOG.initial_baseline_crawl(); return HTMLResponse("&#x2713;")
+    return HTMLResponse(f"<span style='color:var(--accent);'>&#x2713; Nav state cleared for all users.</span>")
 
 threading.Thread(target=start_workspace_service, args=(ROOT_DIR,), daemon=True).start()

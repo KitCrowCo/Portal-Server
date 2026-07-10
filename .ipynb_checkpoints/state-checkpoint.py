@@ -204,15 +204,11 @@ def clear_session(request: Request) -> None:
     sid = _token_hash(request)
     if sid: _SESSION_STORE.pop(sid, None)
 
-async def resolve_theme_full(request: Request, module_ns: Optional[str] = None) -> dict:
-    """Merges: hardcoded base -> server admin default -> module default -> user general -> user per-module override.
-    Always uses core's own DB session internally - never accepts a caller's db, since a module's
-    injected `db` dependency may be bound to that module's own separate database engine."""
-    from .style import DEFAULT_THEMES, get_module_default_theme
+async def resolve_theme_full(request: Request, db, module_ns: Optional[str] = None) -> dict:
+    """Merges: hardcoded base -> server admin default -> module default -> user general -> user per-module override."""
     merged = dict(DEFAULT_THEMES.get("dark", {}))
-    with contextmanager(get_db)() as db:
-        row = db.query(ServerState).first()
-        server_default = ((row.state or {}).get("_theme", {}) if row and row.state else {}).get("server_default", {})
+    row = db.query(ServerState).first()
+    server_default = ((row.state or {}).get("_theme", {}) if row and row.state else {}).get("server_default", {})
     merged.update(server_default)
     if module_ns: merged.update(get_module_default_theme(module_ns))
     user = _get_user(request)

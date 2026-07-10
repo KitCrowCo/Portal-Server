@@ -24,7 +24,6 @@
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>{{ title or os.getenv("SERVER_NAME", "Portal Server") }}</title>
-            <link rel="icon" type="image/png" href="/static/icon-192.png">
 
             {% if PWA %}
                 {% if manifest_path %}
@@ -128,7 +127,7 @@
                     {% endif %}
                 </style>
             {% endif %}
-            <div class="app-shell" data-shell="{{ lvl }}" data-im-scope="{{ shell_uuid }}" style="height:100%; width:100%; position:relative; grid-area:center;{% if theme_diff %}{% for k,v in theme_diff.items() %}--{{ k }}: {{ v }};{% endfor %}{% endif %}">
+            <div class="app-shell" data-shell="{{ lvl }}" data-im-scope="{{ shell_uuid }}" {% if theme_diff %}style="{% for k,v in theme_diff.items() %}--{{ k }}: {{ v }};{% endfor %}"{% endif %}...>
             <!-- <div class="app-shell" data-shell="{{ lvl }}" data-im-scope="{{ shell_uuid }}" style="height:100%; width:100%; position:relative; grid-area:center;" > -->
                 {% if toolbars %}{% for _,v in toolbars.items() %}{{ v|safe }}{% endfor %}{% endif %}
                 <div id="content-{{ shell_uuid }}" class="content">
