@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ os.getenv("SERVER_NAME", "Portal") }}</title>
+    <style>
+        @font-face { font-family:'Inter'; src:url('/static/fonts/Inter/Inter-Regular.ttf'); }
+        :root {
+            {% for key, val in theme.items() %}--{{ key }}: {{ val }};{% endfor %}
+            --font-main: 'Inter', sans-serif;
+            --border-thick: 0.1rem;
+        }
+        *, *::before, *::after { box-sizing: border-box; }
+        html, body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--text); font-family:var(--font-main); font-size:var(--font-size); }
+        body { display:flex; align-items:center; justify-content:center; min-height:100vh; background-image:{{ theme.bg_image }}; background-size:cover; background-position:center; }
+        .glass { background:var(--glass); backdrop-filter:blur(var(--blur)); -webkit-backdrop-filter:blur(var(--blur)); border:var(--border-thick) solid var(--border); border-radius:var(--radius); box-shadow:var(--glass-box-shadow); }
+        input { width:100%; background:var(--bg); border:var(--border-thick) solid var(--border); color:var(--text); padding:0.6rem; border-radius:var(--radius); font-family:inherit; font-size:inherit; }
+        input:focus { outline:none; border-color:var(--accent); }
+        label { display:block; font-size:0.75rem; color:var(--text_muted); margin-bottom:0.4rem; }
+        button[type=submit] { width:100%; background:var(--accent_dim); color:var(--accent); border:var(--border-thick) solid var(--accent); padding:0.7rem; border-radius:var(--radius); cursor:pointer; font-weight:600; font-family:inherit; font-size:inherit; margin-top:0.5rem; }
+        button[type=submit]:hover { background:var(--accent); color:var(--bg); }
+    </style>
+    <script src="/static/js/htmx.min.js"></script>
+</head>
+<body>
+    <div class="glass" style="width:100%;max-width:28rem;padding:2.5rem 2rem;">
+        <h2 style="text-align:center;margin:0 0 2rem;letter-spacing:.2rem;font-size:1.1rem;text-transform:uppercase;opacity:0.8;">{{ os.getenv("SERVER_NAME", "Portal") }}</h2>
+        <form hx-post="/login" hx-target="#login-msg" hx-swap="innerHTML" style="display:flex;flex-direction:column;gap:1.2rem;">
+            {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+            <div><label>Username</label><input type="text" name="username" autocomplete="username" autofocus></div>
+            <div><label>Password</label><input type="password" name="password" autocomplete="current-password"></div>
+            <button type="submit">Login</button>
+            <div id="login-msg" style="font-size:0.8rem;text-align:center;min-height:1.2rem;color:var(--accent);"></div>
+        </form>
+    </div>
+</body>
+</html>
