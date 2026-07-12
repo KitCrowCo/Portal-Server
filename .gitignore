@@ -51,4 +51,8 @@ docker-compose.override.yml
 *.swo
 
 # Backups
-.bak
+.bak__pycache__/
+*.pyc
+.pytest_cache/
+*.save
+*.bak
