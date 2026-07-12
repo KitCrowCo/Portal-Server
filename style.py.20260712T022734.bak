@@ -37,7 +37,6 @@ DEFAULT_THEMES = {
         "recall_button_size": "1.5rem",
         "recall_button_pos": "1rem",
         "bg_image": "",
-        "toolbar_rail_size": "0.4rem",
     },
     "light": {
         "name": "Japanese Zen",
@@ -59,8 +58,7 @@ DEFAULT_THEMES = {
         "recall_button_size": "1.5rem",
         "recall_button_pos": "1rem",
         "bg_image": "none",
-        "font_size": "1.2rem", # This can be bound to a settings slider later
-        "toolbar_rail_size": "0.4rem",
+        "font_size": "1.2rem",                    # This can now be bound to a settings slider later
     }
 }
 
@@ -121,29 +119,76 @@ class UI:
 
     @staticmethod
     def toolbar(side = "left", content = "", size = "18rem", overlay = False, **kwargs):
+        """
+        The Universal Toolbar Container.
+
+        side: 'top', 'bottom', 'left', 'right'
+        content: HTML content inside the toolbar
+        size: toolbar size (width for left/right, height for top/bottom)
+        overlay: True = floats over content (fixed position), False = shrinks content (grid)
+
+        kwargs:
+            id          : element id (default: '{side}-bar')
+            bar_index   : int, for offset when multiple bars on same side
+            start_open  : bool, render as active/expanded on load
+            locked      : bool, hide the recall toggle button
+            resizable   : bool, add drag-to-resize handle
+            max_size    : str, max size as vw/vh percentage (default '90')
+            btn_offset  : str, base offset for recall button (default '0.2rem')
+            btn_pos     : str, override full recall button position style
+            style       : str, override mode_style
+
+            nesting_level: int (default 1)
+                The shell layer this toolbar lives in.
+                0 = portal server shell or stand alone page (top level) - z-index base: 1000
+                1 = module shell (inside a tab frame) - z-index base:  990
+                2 = sub-module shell                  - z-index base:  980
+                ... steps of 10 per level, so each level has 10 z slots for
+                its own stacking (bars, recall btns, overlays).
+
+                Recall buttons step down per side within each level:
+                  top:    level_base + 7
+                  bottom: level_base + 6
+                  left:   level_base + 5
+                  right:  level_base + 4
+                  aside:  level_base + 0 (the bar itself)
+                This guarantees a portal-level overlay toolbar always appears above any module-level toolbar, and a hidden module toolbar naturally falls below everything at its nesting level.
+                Negative z-index for inactive shrink bars keeps them from intercepting pointer events through the content area.
+
+            close_on_select : bool
+                When True, selecting set items closes the sidebar.
+        """
         if side not in ["top", "bottom", "left", "right"]: side = "left"
         bar_id = kwargs.get("id", f"{side}-bar")
         start_open = kwargs.get('start_open', False)
-        max_size = 100
+        max_size = 100 #kwargs.get('max_size', "90")
         offset = kwargs.get('btn_offset', "0.2rem")
-        UI._toolbar_side_ctr[side] = UI._toolbar_side_ctr.get(side, 0) + 1
-        bar_index = int(kwargs.get('bar_index', UI._toolbar_side_ctr[side] - 1))
+        UI._toolbar_side_ctr[side] = UI._toolbar_side_ctr.get(side, 0) + 1 
+        bar_index = int(kwargs.get('bar_index', UI._toolbar_side_ctr[side] - 1)) # Auto-index recall buttons by side across all levels so they never stack
         idx_off = 1.5
         side_size = {"left": "width", "right": "width", "top": "height", "bottom": "height"}
         ortho_side = {"left": "top", "right": "bottom", "top": "right", "bottom": "left"}[side]
         mode = "overlay" if overlay else "shrink"
-        mode_style = kwargs.get("style", f"""position:absolute; {side}:0; {ortho_side}:0; {side_size[ortho_side]}:100%;""" if overlay else "")
+        mode_style = kwargs.get("style", f"""position:fixed; {side}:0; {ortho_side}:0; {side_size[ortho_side]}:100%;""" if overlay else "")
+
+        # -- Nesting z-index system --
         nesting_level = int(kwargs.get('nesting_level', 1))
         Z_BASE = max(0, 1000 - (nesting_level * 10))
         Z_side_stack = {"top": 7, "bottom":6, "left":5, "right": 4}[side]
-        #btn_pos = kwargs.get("btn_pos", f"position:absolute; {side}: {offset + size if start_open else 0}; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:{Z_BASE + Z_side_stack + 1};")
+        btn_pos = kwargs.get("btn_pos", f"position:fixed; {side}: {offset + size if start_open else 0}; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:1010;")
+
+        # Contextual Arrows
         op_side = {"top": "bottom", "bottom":"top", "left":"right", "right":"left"}[side]
         arrows = {"left": "&#x25C0;", "right": "&#x25B6;", "top": "&#x25B2;", "bottom": "&#x25BC;"}
-        responsive_size = (f"{side_size[side]}: min({size}, {max_size}%);" if overlay else f"""height: 100%;{" width: 100%" if side in ["left", "right"] else ""}""")
+
+        # Sizing Logic - Shrink mode: grid track controls the collapsing dimension via --{side}-size CSS var. Explicit height/width on top/bottom fights grid collapse — use 100% to defer to track.
+        responsive_size = (f"{side_size[side]}: min({size}, {max_size}{'vw' if side in ['left','right'] else 'vh'});" if overlay else f"height:100%;{' width:100%' if side in ['left','right'] else ''}")
         toggle_cmd = f'''onclick="toggleToolbar('{bar_id}', '{side}', '{size}', '{mode}', '{arrows[side]}', '{arrows[op_side]}')"'''
-        btn_pos = kwargs.get("btn_pos", f"position:absolute; {side}:0; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:{Z_BASE + Z_side_stack + 3};")
+
+        # Recall button (hidden if locked)
         recall_btn = "" if kwargs.get('locked', False) else f"""<button id="btn-{bar_id}" class="btn-icon toolbar-recall-btn" style="{btn_pos}" {toggle_cmd}>{arrows[side] if start_open else arrows[op_side]}</button>"""
-        inline_close = "" if (kwargs.get('locked', False) or not overlay or kwargs.get('inline_close', True) is False) else f"""<button type="button" class="btn-icon toolbar-inline-close" style="position:absolute; {"bottom" if side!="top" else "top"}:0.4rem; {"right" if side!="right" else "left"}:0.4rem; z-index:{Z_BASE + Z_side_stack + 2};" {toggle_cmd} title="Collapse">&#x2715;</button>"""
+
+        # Drag-resize handle
         if kwargs.get('resizable', False):
             if side in ["left", "right"]:
                 delta_expr  = "ev.clientX - startX" if side == "left" else "startX - ev.clientX"
@@ -151,70 +196,67 @@ class UI:
             else:
                 delta_expr = "ev.clientY - startY" if side == "top" else "startY - ev.clientY"
                 td_expr = "t.clientY - startY" if side == "top" else "startY - t.clientY"
+
             coord_start = "var startX=e.clientX, startY=e.clientY;" if side in ["left","right"] else "var startX=0, startY=e.clientY;"
             td_coord = "var startX=t.clientX, startY=0;" if side in ["left","right"] else "var startX=0, startY=t.clientY;"
-            resize_handle = f"""
-                <div style="position:absolute; {op_side}:0; width:0.6rem; height:100%; cursor:ew-resize; z-index:{Z_BASE + Z_side_stack}; background:transparent;"
-                     onmousedown="(function(e){{
-                         e.preventDefault();
-                         var bar=document.getElementById('{bar_id}');
-                         var btn=document.getElementById('btn-{bar_id}');
-                         var shell=bar.closest('[data-shell]');
-                         var startSize=bar.getBoundingClientRect().{side_size[side]};
-                         {coord_start}
-                         function onMove(ev){{
-                             var delta={delta_expr};
-                             var newSize=Math.max(80, Math.min(startSize+delta, window.innerWidth*{max_size}/100));
-                             bar.style.{side_size[side]}=newSize+'px';
-                             bar.dataset.size=newSize+'px';
-                             shell && shell.style.setProperty('--{side}-size', newSize+'px');
-                             if(btn) btn.style['{side}']=(newSize+8)+'px';
-                         }}
-                         function onUp(){{ document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); }}
-                         document.addEventListener('mousemove',onMove);
-                         document.addEventListener('mouseup',onUp);
-                     }})(event)"
-                     ontouchstart="(function(e){{
-                         var t=e.touches[0];
-                         var bar=document.getElementById('{bar_id}');
-                         var btn=document.getElementById('btn-{bar_id}');
-                         var shell=bar.closest('[data-shell]');
-                         var startSize=bar.getBoundingClientRect().{side_size[side]};
-                         {td_coord}
-                         function onMove(ev){{
-                             ev.preventDefault();
-                             var tc=ev.touches[0];
-                             var delta={td_expr};
-                             var newSize=Math.max(80, Math.min(startSize+delta, window.innerWidth*{max_size}/100));
-                             bar.style.{side_size[side]}=newSize+'px';
-                             bar.dataset.size=newSize+'px';
-                             shell && shell.style.setProperty('--{side}-size', newSize +'px');
-                             if(btn) btn.style['{side}']=(newSize+1)+'px';
-                         }}
-                         function onEnd(){{ document.removeEventListener('touchmove',onMove); document.removeEventListener('touchend',onEnd); }}
-                         document.addEventListener('touchmove',onMove,{{passive:false}});
-                         document.addEventListener('touchend',onEnd);
-                         e.preventDefault();
-                     }})(event)">
-                    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); {side_size[side]}:0.5rem; {side_size[ortho_side]}:2rem; background:var(--border); border-radius:0.2rem; pointer-events:none;"></div>
-                </div>"""
+
+            resize_handle = f"""<div style="position:absolute; {op_side}:0; width:0.6rem; height:100%; cursor:ew-resize; z-index:{Z_BASE + Z_side_stack}; background:transparent;"
+                                    onmousedown="(function(e){{
+                                        e.preventDefault();
+                                        var bar=document.getElementById('{bar_id}');
+                                        var btn=document.getElementById('btn-{bar_id}');
+                                        var shell=bar.closest('[data-shell]');
+                                        var startSize=bar.getBoundingClientRect().{side_size[side]};
+                                        {coord_start}
+                                        function onMove(ev){{
+                                            var delta={delta_expr};
+                                            var newSize=Math.max(80, Math.min(startSize+delta, window.innerWidth*{max_size}/100));
+                                            bar.style.{side_size[side]}=newSize+'px';
+                                            bar.dataset.size=newSize+'px';
+                                            shell && shell.style.setProperty('--{side}-size', newSize+'px');
+                                            if(btn) btn.style['{side}']=(newSize+8)+'px';
+                                        }}
+                                        function onUp(){{ document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); }}
+                                        document.addEventListener('mousemove',onMove);
+                                        document.addEventListener('mouseup',onUp);
+                                    }})(event)"
+                                    ontouchstart="(function(e){{
+                                        var t=e.touches[0];
+                                        var bar=document.getElementById('{bar_id}');
+                                        var btn=document.getElementById('btn-{bar_id}');
+                                        var shell=bar.closest('[data-shell]');
+                                        var startSize=bar.getBoundingClientRect().{side_size[side]};
+                                        {td_coord}
+                                        function onMove(ev){{
+                                            ev.preventDefault();
+                                            var tc=ev.touches[0];
+                                            var delta={td_expr};
+                                            var newSize=Math.max(80, Math.min(startSize+delta, window.innerWidth*{max_size}/100));
+                                            bar.style.{side_size[side]}=newSize+'px';
+                                            bar.dataset.size=newSize+'px';
+                                            shell && shell.style.setProperty('--{side}-size', newSize +'px');
+                                            if(btn) btn.style['{side}']=(newSize+1)+'px';
+                                        }}
+                                        function onEnd(){{ document.removeEventListener('touchmove',onMove); document.removeEventListener('touchend',onEnd); }}
+                                        document.addEventListener('touchmove',onMove,{{passive:false}});
+                                        document.addEventListener('touchend',onEnd);
+                                        e.preventDefault();
+                                    }})(event)">
+                                    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); {side_size[side]}:0.5rem; {side_size[ortho_side]}:2rem; background:var(--border); border-radius:0.2rem; pointer-events:none;"></div>
+                                </div>"""
         else:
             resize_handle = ""
-        im_scope = kwargs.get("im_scope", ""); im_role = kwargs.get("im_role", "")
-        im_attrs = f'data-im-scope="{im_scope}" data-im-role="{im_role}"' if im_scope or im_role else ""
-        grid_area = "1 / 1 / -1 / -1" if overlay else side
 
-        return f"""
-            {recall_btn}
-            <aside id="{bar_id}" class="toolbar {mode} toolbar-{side} {"active" if start_open else ""}" data-side="{side}" data-size="{size}" data-mode="{mode}"
-                data-nesting="{nesting_level}" data-close-on-select="{str(kwargs.get('close_on_select', False)).lower()}" {im_attrs}
-                style="{responsive_size} {mode_style} border-{op_side}: var(--border-thick, 0.1rem) solid var(--border); z-index:{Z_BASE + Z_side_stack}; grid-area:{grid_area};">
-                <div class="toolbar-internal">
-                    {content}
-                </div>
-                {resize_handle}
-            </aside>
-            """
+        im_scope = kwargs.get("im_scope", "")
+        im_role  = kwargs.get("im_role", "")
+        im_attrs = f'data-im-scope="{im_scope}" data-im-role="{im_role}"' if im_scope or im_role else ""
+        return f"""{recall_btn}
+                    <aside id="{bar_id}" class="toolbar {mode} toolbar-{side} {"active" if start_open else ""}" data-side="{side}" data-size="{size}" data-mode="{mode}"
+                        data-nesting="{nesting_level}" data-close-on-select="{str(kwargs.get('close_on_select', False)).lower()}" {im_attrs}
+                        style="{responsive_size} {mode_style} border-{op_side}: var(--border-thick, 0.1rem) solid var(--border); z-index:{Z_BASE + Z_side_stack}; grid-area:{side};">
+                        <div class="toolbar-internal">{content}</div>
+                        {resize_handle}
+                    </aside>"""
 
     # --- Tab Bar & Tabs ---
 
@@ -258,8 +300,8 @@ class UI:
         width, max_width = kwargs.get("width", "90%"), kwargs.get("max_width", "30rem")
         style = f"""<style>
                         #backdrop-{modal_id} {{ position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 9999; backdrop-filter: blur(calc(var(--blur) / 2)); }}
-                        #modal-{modal_id} {{ width: {width}; max-width: {max_width}; max-height: 90vh; overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; position:relative; box-sizing: border-box; }}
-                        .modal-header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: var(--board-thick) solid var(--border); padding-bottom: 0.5rem; }}
+                        #modal-{modal_id} {{ width: {width}; max-width: {max_width}; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; position:relative; }}
+                        .modal-header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: var(--border-thick) solid var(--border); padding-bottom: 0.5rem; }}
                         .modal-header h3 {{ margin: 0; font-size: 1.1rem; }}
                     </style>"""
         return f"""{style}
@@ -342,6 +384,7 @@ class UI:
     _TREE_SKIP_DIRS = frozenset({".git", "__pycache__", ".ipynb_checkpoints", ".mypy_cache", ".pytest_cache", "node_modules", ".trash", ".venv", "venv", ".tox", ".ruff_cache"})
     _TREE_SKIP_SUFFIXES = frozenset({".bak", ".pyc", ".pyo"})
 
+    @staticmethod
     @staticmethod
     def tree(items=None, path=None, selected=None, active=None, post_url=None, target=None, swap="outerHTML", rel_to=None, depth=0, extra_vals=None, selectable=False, mode="file", options=None, visible_fn=None, label_fn=None, **kwargs) -> str:
         """Filesystem tree relying strictly on absolutely resolved in-memory registry slices. Zero disk I/O."""

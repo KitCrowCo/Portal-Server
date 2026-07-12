@@ -116,8 +116,8 @@ def _url(*parts): return "/".join(p.strip("/") for p in [_P, *parts] if p)
 # Anything here produces opaque, pre-rendered HTML that gets stashed as a single \x00CODE{n}\x00 token by md_plus_transpiler, the same protection mechanism fenced code already used. This is what fixes loose_breaks (every-Enter-is-a-break) corrupting graphviz/details output - a multi-line block that never enters the paragraph splitter as raw text can't be mangled by it.
 
 _TABSET_OPEN = re.compile(r'^(#{1,6})[ \t]+(.*?)[ \t]+\{\.tabset\}[ \t]*$')
-_TABSET_END = re.compile(r'^\{end\.tabset\}[ \t]*$')
-_HEADER = re.compile(r'^(#{1,6})[ \t]')
+_TABSET_END  = re.compile(r'^\{end\.tabset\}[ \t]*$')
+_HEADER      = re.compile(r'^(#{1,6})[ \t]')
 
 def _extract_tabsets(lines: list[str]) -> tuple[list[str], list[dict]]:
     """Single pass, stack-based. Returns (lines_with_tabset_bodies_removed, tabset_records).
@@ -214,26 +214,14 @@ MD_LIVE_EDIT_INIT_JS = """
             cm.getWrapperElement().classList.add('cm-live-edit');
             MD_LIVE.attach(cm);
             cm.on('change', function(){
-                ta.dataset.dirty = '1';
                 cm.save();
                 ta.dispatchEvent(new Event('input', {bubbles:true}));
                 ta.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
-            });
-            cm.on('blur', function(){
-                if (ta.dataset.dirty !== '1') return;
-                cm.save();
-                htmx.trigger(ta, 'blursave');
-                ta.dataset.dirty = '0';
             });
             ta.cm = cm;
         });
     }
     document.addEventListener('htmx:afterSwap', function(e){ initLiveEdit(e.detail.target); });
-    document.addEventListener('im:tab-flush', function(){
-        document.querySelectorAll('textarea[id^="doc-textarea-"]').forEach(function(ta){
-            if (ta.cm && ta.dataset.dirty === '1') { ta.cm.save(); htmx.trigger(ta, 'blursave'); ta.dataset.dirty = '0'; }
-        });
-    });
     initLiveEdit();
 })();
 """
@@ -888,9 +876,9 @@ CHAT_CSS = """
 .cm-bwrap{flex:1;display:flex;flex-direction:column;min-width:0;max-width:92%;}
 .cm-msg.cm-me .cm-bwrap{align-items:flex-end;}
 .cm-msg.cm-sys .cm-bwrap,.cm-msg.cm-full .cm-bwrap{max-width:100%;}
+.cm-acts-side{display:flex;flex-direction:column;gap:.12rem;opacity:0; transition:opacity .15s;flex-shrink:0;justify-content:flex-end;padding-bottom:.35rem;width:.8rem;}
 .cm-msg:hover .cm-acts-side{opacity:1;}
-.cm-acts-side{display:flex;flex-direction:column;gap:.15rem;opacity:0;transition:opacity .15s;flex-shrink:0;justify-content:flex-end;padding-bottom:.35rem;}
-.cm-act{background:var(--surface);border:var(--board-thick) solid var(--border);color:var(--text_muted);border-radius:.3rem;padding:.15rem .35rem;cursor:pointer;font-size:.7rem;line-height:1.2;display:block;white-space:nowrap;text-align:center;}
+.cm-act{background:var(--surface);border:var(--border-thick) solid var(--border);color:var(--text_muted);border-radius:.3rem;padding:.1rem .25rem;cursor:pointer;font-size:.65rem;line-height:1.3; display:block;width:100%; text-align:center;}
 .cm-act:hover{color:var(--accent);border-color:var(--accent);}
 .cm-bubble{padding:.5rem .75rem; border-radius:1rem;overflow-wrap:break-word;word-break:break-word;min-width:0;border:var(--border-thick) solid transparent;}
 .cm-me .cm-bubble{border-bottom-right-radius:.2rem;}
@@ -1223,15 +1211,11 @@ function peDownload(did, filename) {
 function pePrint(did) {
     var prev = document.getElementById('editor-preview-'+did);
     var titleEl = document.getElementById('doc-title-'+did);
-    var docTitle = titleEl ? titleEl.value : 'Document';
+    var docTitle = (titleEl ? titleEl.value : 'Document').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var html = prev ? prev.innerHTML : ((document.getElementById('doc-textarea-'+did)||{}).value || '');
     var w = window.open('', '_blank');
-    var titleNode = w.document.createElement('title');
-    titleNode.textContent = docTitle;
-    w.document.head.appendChild(titleNode);
-    w.document.body.innerHTML = html;
-    w.focus();
-    w.print();
+    w.document.write('<html><head><title>'+docTitle+'</title></head><body>'+html+'</body></html>');
+    w.document.close(); w.focus(); w.print();
 }
 window.addEventListener('beforeunload', function(e) {
     if (document.querySelector('.editor-dirty-dot[style*="inline"]')) { e.preventDefault(); e.returnValue = ''; }
@@ -1303,8 +1287,8 @@ class PortalEditor:
         url, vals = self._get_action_url("settings", did)
         extra = "".join(f', "{k}":{json.dumps(v)}' for k, v in patch.items())
         vals = vals.replace('}', f'{extra}}}') if self.IM else f"hx-vals='{json.dumps(patch)}'"
-        return f"""<button type="button" class="btn-icon {"active" if active else ""}" title="{title}" hx-post="{url}" {vals} hx-include="#doc-textarea-{did}" hx-target="#editor-shell-{did}" hx-swap="outerHTML">{icon}</button>"""
-    
+        return f"""<button type="button" class="btn-icon {"active" if active else ""}" title="{title}" hx-post="{url}" {vals} hx-target="#editor-shell-{did}" hx-swap="outerHTML">{icon}</button>"""
+
     def render_shell(self, doc: dict, settings = {}, include_css: bool = True) -> str:
         did = doc["id"]; s = self._settings(doc, settings)
         style_tag = f"<style>{self.CSS}</style>" if include_css else ""
@@ -1333,8 +1317,8 @@ class PortalEditor:
             url, vals = self._get_action_url("settings", did)
             val_payload = f', "view":"{v}"' if self.IM else f"""hx-vals='{{"view":"{v}"}}'"""
             if self.IM: vals = vals.replace('}', f'{val_payload}}}')
-            return f"""<button class="ui-btn {"active" if v == view else ""}" style="padding:0.3rem 0.6rem; font-size:0.85rem;" hx-post="{url}" {vals} hx-include="#doc-textarea-{did}" hx-target="#editor-shell-{did}" hx-swap="outerHTML">{label}</button>"""
-        
+            return f"""<button class="ui-btn {"active" if v == view else ""}" style="padding:0.3rem 0.6rem; font-size:0.85rem;" hx-post="{url}" {vals} hx-target="#editor-shell-{did}" hx-swap="outerHTML">{label}</button>"""
+
         url_rename, vals_rename = self._get_action_url("rename", did)
         url_search, vals_search = self._get_action_url("search_form", did)
         url_info, vals_info = self._get_action_url("info", did)
@@ -1501,13 +1485,8 @@ class PortalEditor:
         for k in ("view","wrap","font","zoom","border","interactive"):
             if k in payload: current_settings[k] = payload[k]
         doc["settings"] = current_settings
-        if "content" in payload and self.fm and self.get_tab:
-            tab = await self.get_tab(request, payload.get("branch", "default"))
-            if tab and tab.get("path"):
-                try: self.fm.write(tab["path"], payload["content"]); doc["content"] = payload["content"]
-                except Exception: pass
         return imr.raw(self.render_shell(doc, include_css=False))
-    
+
     async def _im_preview(self, request, payload, imr):
         doc = await self._get_doc_from_state(request, payload)
         zoom = doc.get("settings", {}).get("zoom", 1.0)
@@ -1543,7 +1522,7 @@ class PortalEditor:
         doc["content"] = new_content
         zoom = doc.get("settings", {}).get("zoom", 1.0)
         return imr.raw(self.render_preview(new_content, zoom=zoom, task_interactive=True, doc_id=doc["id"], path=doc.get("path",""), **self.render_kwargs_fn()))
-    
+
 # --- Settings Manager (Strictly Agnostic) ---
 
 class SettingField:

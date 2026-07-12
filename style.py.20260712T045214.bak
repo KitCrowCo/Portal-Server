@@ -37,7 +37,6 @@ DEFAULT_THEMES = {
         "recall_button_size": "1.5rem",
         "recall_button_pos": "1rem",
         "bg_image": "",
-        "toolbar_rail_size": "0.4rem",
     },
     "light": {
         "name": "Japanese Zen",
@@ -59,8 +58,7 @@ DEFAULT_THEMES = {
         "recall_button_size": "1.5rem",
         "recall_button_pos": "1rem",
         "bg_image": "none",
-        "font_size": "1.2rem", # This can be bound to a settings slider later
-        "toolbar_rail_size": "0.4rem",
+        "font_size": "1.2rem",                    # This can now be bound to a settings slider later
     }
 }
 
@@ -136,14 +134,13 @@ class UI:
         nesting_level = int(kwargs.get('nesting_level', 1))
         Z_BASE = max(0, 1000 - (nesting_level * 10))
         Z_side_stack = {"top": 7, "bottom":6, "left":5, "right": 4}[side]
-        #btn_pos = kwargs.get("btn_pos", f"position:absolute; {side}: {offset + size if start_open else 0}; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:{Z_BASE + Z_side_stack + 1};")
+        btn_pos = kwargs.get("btn_pos", f"position:absolute; {side}: {offset + size if start_open else 0}; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:{Z_BASE + Z_side_stack + 1};")
         op_side = {"top": "bottom", "bottom":"top", "left":"right", "right":"left"}[side]
         arrows = {"left": "&#x25C0;", "right": "&#x25B6;", "top": "&#x25B2;", "bottom": "&#x25BC;"}
-        responsive_size = (f"{side_size[side]}: min({size}, {max_size}%);" if overlay else f"""height: 100%;{" width: 100%" if side in ["left", "right"] else ""}""")
+        responsive_size = (f"{side_size[side]}: min({size}, {max_size}{'vw' if side in ['left','right'] else 'vh'});" if overlay else f"height:100%;{' width:100%' if side in ['left','right'] else ''}")
         toggle_cmd = f'''onclick="toggleToolbar('{bar_id}', '{side}', '{size}', '{mode}', '{arrows[side]}', '{arrows[op_side]}')"'''
-        btn_pos = kwargs.get("btn_pos", f"position:absolute; {side}:0; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:{Z_BASE + Z_side_stack + 3};")
         recall_btn = "" if kwargs.get('locked', False) else f"""<button id="btn-{bar_id}" class="btn-icon toolbar-recall-btn" style="{btn_pos}" {toggle_cmd}>{arrows[side] if start_open else arrows[op_side]}</button>"""
-        inline_close = "" if (kwargs.get('locked', False) or not overlay or kwargs.get('inline_close', True) is False) else f"""<button type="button" class="btn-icon toolbar-inline-close" style="position:absolute; {"bottom" if side!="top" else "top"}:0.4rem; {"right" if side!="right" else "left"}:0.4rem; z-index:{Z_BASE + Z_side_stack + 2};" {toggle_cmd} title="Collapse">&#x2715;</button>"""
+        inline_close = "" if (kwargs.get('locked', False) or not overlay or kwargs.get('inline_close', True) is False) else f"""<button type="button" class="btn-icon" style="position:absolute; {"bottom" if side!="top" else "top"}:0.4rem; {"right" if side!="right" else "left"}:0.4rem; z-index:{Z_BASE + Z_side_stack + 2};" {toggle_cmd} title="Collapse">&#x2715;</button>"""
         if kwargs.get('resizable', False):
             if side in ["left", "right"]:
                 delta_expr  = "ev.clientX - startX" if side == "left" else "startX - ev.clientX"
@@ -202,20 +199,18 @@ class UI:
             resize_handle = ""
         im_scope = kwargs.get("im_scope", ""); im_role = kwargs.get("im_role", "")
         im_attrs = f'data-im-scope="{im_scope}" data-im-role="{im_role}"' if im_scope or im_role else ""
-        grid_area = "1 / 1 / -1 / -1" if overlay else side
-
         return f"""
             {recall_btn}
             <aside id="{bar_id}" class="toolbar {mode} toolbar-{side} {"active" if start_open else ""}" data-side="{side}" data-size="{size}" data-mode="{mode}"
                 data-nesting="{nesting_level}" data-close-on-select="{str(kwargs.get('close_on_select', False)).lower()}" {im_attrs}
-                style="{responsive_size} {mode_style} border-{op_side}: var(--border-thick, 0.1rem) solid var(--border); z-index:{Z_BASE + Z_side_stack}; grid-area:{grid_area};">
+                style="{responsive_size} {mode_style} border-{op_side}: var(--border-thick, 0.1rem) solid var(--border); z-index:{Z_BASE + Z_side_stack}; grid-area:{side};">
                 <div class="toolbar-internal">
                     {content}
                 </div>
+                {inline_close}
                 {resize_handle}
             </aside>
             """
-
     # --- Tab Bar & Tabs ---
 
     @staticmethod
@@ -258,8 +253,8 @@ class UI:
         width, max_width = kwargs.get("width", "90%"), kwargs.get("max_width", "30rem")
         style = f"""<style>
                         #backdrop-{modal_id} {{ position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 9999; backdrop-filter: blur(calc(var(--blur) / 2)); }}
-                        #modal-{modal_id} {{ width: {width}; max-width: {max_width}; max-height: 90vh; overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; position:relative; box-sizing: border-box; }}
-                        .modal-header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: var(--board-thick) solid var(--border); padding-bottom: 0.5rem; }}
+                        #modal-{modal_id} {{ width: {width}; max-width: {max_width}; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; position:relative; }}
+                        .modal-header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: var(--border-thick) solid var(--border); padding-bottom: 0.5rem; }}
                         .modal-header h3 {{ margin: 0; font-size: 1.1rem; }}
                     </style>"""
         return f"""{style}

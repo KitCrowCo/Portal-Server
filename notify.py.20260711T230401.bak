@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import Column, Integer, String, JSON, Text
 from sqlalchemy.orm import Session
-from .database import Base, engine, get_db, SessionLocal
+from .database import Base, engine, get_db
 from .auth import get_current_user
 from pywebpush import webpush, WebPushException
 from .ws_manager import manager as _ws_manager
@@ -67,43 +67,45 @@ def _try_push(sub: PushSubscription, title: str, body: str, url: str = "/") -> b
         logger.debug("Push send error for %s: %s", sub.endpoint[:40], e)
         return False
 
-async def send_push(username: str, title: str, body: str, url: str = "/") -> int:
-    """Send push to all subscriptions for username. Prunes dead endpoints.
-    Opens its own DB session - never accepts a caller's, since a module's injected
-    `db` dependency may be bound to that module's own separate database engine."""
-    if _ws_manager:
-        try: await _ws_manager.send_personal_message({"type": "notification", "title": title, "body": body, "url": url}, username)
-        except Exception as e: logger.debug("WS notify error for %s: %s", username, e)
-    if not PUSH_ENABLED: return 0
-    db = SessionLocal()
+async def send_push(username: str, title: str, body: str, db: Session, url: str = "/") -> int:
+    """
+    Send push to all subscriptions for username. Prunes dead endpoints.
+    Also delivers via WebSocket if the user is currently connected.
+    Returns count of successful pushes.
+    """
+    # WS delivery — instant if user is online, no-op otherwise
     try:
-        subs = db.query(PushSubscription).filter(PushSubscription.username == username).all()
-        if not subs: return 0
-        dead = [s for s in subs if _try_push(s, title, body, url)]
-        for s in dead: db.delete(s)
-        if dead: db.commit()
-        return len(subs) - len(dead)
-    finally: db.close()
+        await _ws_manager.send_personal_message({"type": "notification", "title": title, "body": body, "url": url}, username)
+    except Exception as e:
+        logger.debug("WS notify error for %s: %s", username, e)
+    if not PUSH_ENABLED: return 0
+    subs = db.query(PushSubscription).filter(PushSubscription.username == username).all()
+    if not subs: return 0
+    dead = [s for s in subs if _try_push(s, title, body, url)]
+    for s in dead:
+        db.delete(s)
+    if dead: db.commit()
+    return len(subs) - len(dead)
 
-async def broadcast_push(title: str, body: str, url: str = "/", role_filter: Optional[str] = None) -> int:
-    if _ws_manager:
-        try: await _ws_manager.broadcast({"type": "notification", "title": title, "body": body, "url": url})
-        except Exception as e: logger.debug("WS broadcast error: %s", e)
-    if not PUSH_ENABLED: return 0
-    db = SessionLocal()
+async def broadcast_push(title: str, body: str, db: Session, url: str = "/", role_filter: Optional[str] = None) -> int:
+    """ Send to all subscriptions, optionally filtered by role. Joins PushSubscription → User for role filtering. """
     try:
-        if role_filter:
-            from .models import User as _User
-            usernames = {u.username for u in db.query(_User).filter(_User.role == role_filter).all()}
-            subs = db.query(PushSubscription).filter(PushSubscription.username.in_(usernames)).all()
-        else:
-            subs = db.query(PushSubscription).all()
-        if not subs: return 0
-        dead = [s for s in subs if _try_push(s, title, body, url)]
-        for s in dead: db.delete(s)
-        if dead: db.commit()
-        return len(subs) - len(dead)
-    finally: db.close()
+        await _ws_manager.broadcast({"type": "notification", "title": title, "body": body, "url": url})
+    except Exception as e:
+        logger.debug("WS broadcast error: %s", e)
+    if not PUSH_ENABLED: return 0
+    if role_filter:
+        from .models import User as _User
+        usernames = {u.username for u in db.query(_User).filter(_User.role == role_filter).all()}
+        subs = db.query(PushSubscription).filter(PushSubscription.username.in_(usernames)).all()
+    else:
+        subs = db.query(PushSubscription).all()
+    if not subs: return 0
+    dead = [s for s in subs if _try_push(s, title, body, url)]
+    for s in dead:
+        db.delete(s)
+    if dead: db.commit()
+    return len(subs) - len(dead)
 
 # --- Router ---
 

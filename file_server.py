@@ -157,6 +157,8 @@ def notify_manual_mutation(absolute_paths: list[str], event_type: str = "modifie
     for path in absolute_paths:
         _GLOBAL_WATCHDOG.patch_node(path, event_type)
 
+def get_watchdog(): return _GLOBAL_WATCHDOG
+
 def start_workspace_service(root_path: str = None):
     global _SERVICE_INITIALIZED, _GLOBAL_WATCHDOG, _GLOBAL_OBSERVER
     from watchdog.observers import Observer

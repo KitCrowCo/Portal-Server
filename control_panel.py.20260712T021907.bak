@@ -55,7 +55,6 @@ def control_panel_main(request: Request, user=Depends(get_current_user)):
     nav_items = []
     if user.role == "admin": nav_items += [("User Management", f"{_pre}/users"), ("Notifications", f"{_pre}/notifications"), ("Module Access", f"{_pre}/module-access"), ("Server Theme", f"{_pre}/theme/server-default")]
     nav_items += [("Identity", f"{_pre}/account"), ("Appearance", f"{_pre}/appearance")]
-    if user.role == "admin": nav_items += [("User Management", f"{_pre}/users"), ("Notifications", f"{_pre}/notifications"), ("Module Access", f"{_pre}/module-access"), ("External Links", f"{_pre}/ext-links"), ("Server Theme", f"{_pre}/theme/server-default")]
     nav_html = "".join(f'<button type="button" hx-get="{url}" hx-target="#cp-content" hx-swap="innerHTML" class="nav-link" style="background:none; border:none; text-align:left; width:100%; padding:0.35rem 0.5rem; cursor:pointer;">{label}</button>' for label, url in nav_items)
     tools_dir = [[json.dumps({'type':'_portal_open_tab', 'path':f'/tool/{f}/', 'label':f.replace("_", " ").title(), 'id':f.replace("_", "-")}), f.replace("_", " ").title()]  for f in sorted(os.listdir("tools")) if _valid_folder("tools", f)]
     tools_options = "".join(f"<option value='{f[0]}'>{f[1]}</option>" for f in  tools_dir)

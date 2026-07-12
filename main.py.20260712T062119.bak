@@ -139,28 +139,23 @@ def load_server_router(path, item, prefix, dependencies={}, router_type="module"
     effective_prefix = "public" if path_modifier == "public" else prefix
     try:
         spec = importlib.util.spec_from_file_location(f"{path_modifier}{dash}{item}", main_path)
-        mod = importlib.util.module_from_spec(spec)
+        mod  = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         module_meta = {"label": item.replace("_", " ").title(), "icon": "", "description": "-", "persistence": "public", "public": False}
         module_meta.update(getattr(mod, "MODULE_META", None) or getattr(mod, "TOOL_META", {}))
         auth_dep = [] if (path_modifier == "public" or module_meta.get("public")) else [Depends(get_current_user)]
         app.include_router(mod.router, prefix=f"/{effective_prefix}/{item}", tags=[f"{item}:{router_type}"], dependencies=auth_dep)
         if verbose: print(f"Loaded {router_type} router: {path_modifier}{dash}{item}")
-        if path_modifier != "public": metas[router_type].update({item: module_meta})
-#        metas[router_type].update({item: module_meta})
-        refresh_cb = dependencies.get("refresh_system") if dependencies else None
-        deps_with_meta = {**dependencies, "meta": module_meta}
-        if refresh_cb: deps_with_meta["refresh_system"] = refresh_cb(f"/{effective_prefix}/{item}", mod.router)
+        metas[router_type].update({item: module_meta})
+        deps_with_meta = {**dependencies, "meta": module_meta, "refresh_system": dependencies.get("refresh_system")(f"/{effective_prefix}/{item}", mod.router)} if dependencies else {"meta": module_meta}
         if dependencies and hasattr(mod, "init_module"):
             mod.init_module(deps_with_meta)
             if verbose: print(f"Environment injected into module: {item}")
         return True
     except Exception as e:
-        import traceback
-        print(f"Error loading {path_modifier}{dash}{item} router: {e}")
-        traceback.print_exc()
-        return False
-
+        print(f"Error loading {item} router: {e}")
+        return False            
+            
 def load_modules(module_type="module"):
     modules_dir = module_type + "s"
     db = SessionLocal()
@@ -217,8 +212,7 @@ def load_modules(module_type="module"):
             if os.path.exists(f"{module_path}/static"):
                 os.makedirs(f"./data/{item}/static", exist_ok = True)
                 app.mount(f"/{module_type}/assets/{item}", StaticFiles(directory=f"./data/{item}/static"),  name=f"{module_type}_assets_{item}")
-            if True: #os.path.exists(f"{module_path}/public_{item}"):
-                if VERBOSE: print(F"Mounting Public Router:{item}")
+            if os.path.exists(f"{module_path}/public_{item}"):
                 public_deps = {"templates": templates, "theme": active_theme.config if active_theme else {}, "tools": Tools, "resolve_theme": resolve_theme_full, "get_state": get_state}
                 load_server_router(module_path, item, prefix=module_type, dependencies=public_deps, router_type=module_type, path_modifier="public", verbose=VERBOSE)
 
@@ -275,7 +269,7 @@ async def handle_login(response: Response, request: Request, username: str = For
         next_url = next if next.startswith("/") else "/"
         response.headers["HX-Redirect"] = next_url
         return {"status": "ok"}
-    return HTMLResponse("<span style='color:#ff4d4f;'>&#x26A0; Invalid username or password.</span>", status_code=401)
+    return HTMLResponse(content="Invalid Username and Password", status_code=401)
 
 @app.get("/logout")
 async def logout(request: Request, response: Response):
@@ -286,8 +280,9 @@ async def logout(request: Request, response: Response):
 # -- Core Routes --
 
 def sync_module_docs():
-    """Copies each module's static/README.md (if present) into the _common shared root under Modules/{name}.md, so any module can ship user-facing docs that appear in-wiki automatically.
-    Same overwrite-only-if-changed behavior as sync_information_docs()."""
+    """Copies each module's static/README.md (if present) into the wiki's shared root
+    under Modules/{name}.md, so any module can ship user-facing docs that appear
+    in-wiki automatically. Same overwrite-only-if-changed behavior as sync_information_docs()."""
     dest_dir = pathlib.Path("./data/_common/Modules")
     for item in get_module_list():
         src = pathlib.Path(f"./modules/{item}/static/README.md")
@@ -320,10 +315,7 @@ async def external_frame(url: str, request: Request, user=Depends(get_current_us
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)):
-    try:
-        await websocket.accept()
-    except Exception as e:
-        print(f"[WS] accept error: {e}")
+    await websocket.accept()
     user_id = "anonymous"
     try:
         token = websocket.cookies.get("access_token") or websocket.query_params.get("token", "")
@@ -409,14 +401,14 @@ async def dashboard(request: Request, user=Depends(get_current_user)):
     state, content_area = await _render_content_area(request, state)
     nav_bar = await TM.tab_bar_fn(state, "portal-nav-bar-inner", _pre)
     top_content = f"""<div style="display:flex; flex-direction:column; height:100%;">
-                          <div style="padding:0 0.4rem; height:1.5rem; display:flex; align-items:center; font-size:0.5rem; color:var(--text_muted); letter-spacing:0.05rem; border-bottom:var(--border-thick) solid var(--border); flex-shrink:0;">
+                          <div style="padding:0 0.6rem; height:2rem; display:flex; align-items:center; font-size:0.5rem; color:var(--text_muted); letter-spacing:0.1rem; border-bottom:var(--border-thick) solid var(--border); flex-shrink:0;">
                               {" "*2 + SERVER_NAME}
                           </div>
                           <div id="portal-nav-bar-outer" style="flex:1; min-height:0; overflow:hidden;">{nav_bar}</div>
                       </div>"""
     return templates.TemplateResponse(name = "base.html", request = request, context = {"request": request, "user": user, "PWA": True, "content": content_area, "code_mirror": True, **_portal_im.template_context(),
                         "main_left_toolbar": nav,
-                        "toolbars": {"top": UI.toolbar(side="top", content = top_content, size = "4.5rem", overlay = False, start_open = True, id = "portal-top-bar", nesting_level = 0)}})
+                        "toolbars": {"top": UI.toolbar(side="top", content = top_content, size = "4.35rem", overlay = False, start_open = True, id = "portal-top-bar", nesting_level = 0)}})
 
 @app.get("/launcher", response_class = HTMLResponse)
 async def launcher(request: Request):
@@ -446,11 +438,6 @@ async def reset_nav_all(request: Request, user=Depends(get_current_user), db=Dep
     return HTMLResponse(f"<span style='color:var(--accent);'>&#x2713; Nav and Module states cleared for all users.</span>")
 
 @app.post("/rescan")
-async def force_rescan():
-    from .file_server import get_watchdog
-    wd = get_watchdog()
-    if not wd: return HTMLResponse("<span style='color:#ffaa44;'>Workspace service not ready yet - try again in a moment.</span>", status_code=503)
-    wd.initial_baseline_crawl()
-    return HTMLResponse("&#x2713;")
+async def force_rescan(): _GLOBAL_WATCHDOG.initial_baseline_crawl(); return HTMLResponse("&#x2713;")
 
 threading.Thread(target=start_workspace_service, args=(ROOT_DIR,), daemon=True).start()

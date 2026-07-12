@@ -69,32 +69,44 @@ body.recall-hidden .toolbar-recall-btn { opacity: 0 !important; pointer-events: 
 .content { grid-area: center; overflow: auto; min-height: 0; min-width: 0; }
 
 /* -- Toolbars -- */
-.toolbar { visibility:visible; background:var(--bg_panel); backdrop-filter:blur(var(--blur)); -webkit-backdrop-filter:blur(var(--blur)); box-sizing:border-box; display:flex; overflow:hidden; flex-direction:column; position:relative; }
-.toolbar-internal { display:flex; flex-direction:column; padding:.1rem; width:100%; flex:1; min-height:0; }
-
-.toolbar.overlay { transition:transform 0.4s cubic-bezier(0.16,1,0.3,1), opacity 0.3s, visibility 0s linear 0.4s; }
-.toolbar.overlay.toolbar-left:not(.active) { transform:translateX(-100%); }
-.toolbar.overlay.toolbar-right:not(.active) { transform:translateX(100%); }
-.toolbar.overlay.toolbar-top:not(.active) { transform:translateY(-100%); }
-.toolbar.overlay.toolbar-bottom:not(.active) { transform:translateY(100%); }
-.toolbar.overlay:not(.active) { visibility:hidden; }
-.toolbar.overlay.active { transform: translate(0,0); visibility: visible; transition: transform 0.4s cubic-bezier(0.16,1,0.3,1), opacity 0.3s, visibility 0s linear 0s; }
-
-.toolbar.shrink { transition:transform 0.25s ease, width 0.25s ease, height 0.25s ease; }
-.toolbar:not(.active) { visibility:hidden; pointer-events:none; }
-
-.toolbar-recall-btn { 
-    width: var(--recall_button_size, 3rem); 
-    height: var(--recall_button_size, 3rem); 
-    color: var(--accent); 
-    background: var(--accent_dim); 
-    border: var(--border-thick) solid var(--border); 
-    border-radius: 50%; 
-    transition: opacity 0.2s; 
+.toolbar {
+    visibility: visible;
+    background: var(--bg_panel);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    box-sizing: border-box;
+    display: flex;
+    overflow: hidden;
+    flex-direction: column;
 }
+
+.toolbar-internal { display: flex; flex-direction: column; padding: .1rem; width: 100%; flex: 1; min-height: 0; }
+
+/* Overlay toolbars: slide animation + visibility gate. */
+.toolbar.overlay { transition: transform 0.4s cubic-bezier(0.16,1,0.3,1), opacity 0.3s, visibility 0s linear 0.4s; }
+.toolbar.overlay.toolbar-left:not(.active) { transform: translateX(-100%); }
+.toolbar.overlay.toolbar-right:not(.active) { transform: translateX(100%); }
+.toolbar.overlay.toolbar-top:not(.active) { transform: translateY(-100%); translateZ(-10000); }
+.toolbar.overlay.toolbar-bottom:not(.active) { transform: translateY(100%); }
+.toolbar.overlay:not(.active) { visibility: hidden; }
+.toolbar.overlay.active { transform: translate(0,0); }
+
+/* Shrink toolbars: clipped by grid overflow:hidden when row/col is 0px */
+.toolbar.shrink { transition: transform 0.25s ease, width 0.25s ease, height 0.25s ease; }
+.toolbar:not(.active) { visibility: hidden; pointer-events: none; }
+
+.toolbar-recall-btn {
+    width: var(--recall_button_size, 1.5rem);
+    height: var(--recall_button_size, 1.5rem);
+    grid-area: center;
+    color: var(--accent);
+    background: var(--accent_dim);
+    border: var(--border-thick) solid var(--border);
+    border-radius: 50%;
+    transition: opacity 0.2s;
+}
+
 .toolbar-recall-btn:hover { background: var(--accent); color: var(--bg); }
-.toolbar-inline-close { opacity: 0.55; }
-.toolbar-inline-close:hover { opacity: 1; }
 
 /* -- Shared components -- */
 .glass {
