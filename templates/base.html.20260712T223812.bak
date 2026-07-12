@@ -102,7 +102,7 @@
                             <a href='/logout' class='nav-link' style='opacity:0.7;'>Logout</a>
                         </div>
                     {% endset %}
-                    {{ UI.toolbar(side="left", content=main_sidebar_content, size="18rem", overlay=True, start_open=True, id="Main-left-bar", resizable=True, nesting_level = -1)|safe }}
+                    {{ UI.toolbar(side="left", content=main_sidebar_content, size="18rem", overlay=False, start_open=True, id="Main-left-bar", resizable=True, nesting_level = -1)|safe }}
                 {% endif %}
 
 <!-- Not an orphan, just splits html tags, this is for the first 'if lvl == 0' -->
