@@ -56,3 +56,5 @@ docker-compose.override.yml
 .pytest_cache/
 *.save
 *.bak
+__pycache__/
+.ipynb*
