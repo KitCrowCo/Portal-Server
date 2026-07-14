@@ -221,7 +221,7 @@ def load_modules(module_type="module"):
             if os.path.exists(f"{module_path}/static"):
                 os.makedirs(f"./data/{item}/static", exist_ok = True)
                 app.mount(f"/{module_type}/assets/{item}", StaticFiles(directory=f"./data/{item}/static"),  name=f"{module_type}_assets_{item}")
-            if True: #os.path.exists(f"{module_path}/public_{item}"):
+            if os.path.exists(f"{module_path}/public_{item}"):
                 if VERBOSE: print(F"Mounting Public Router:{item}")
                 public_deps = {"templates": templates, "theme": active_theme.config if active_theme else {}, "tools": Tools, "resolve_theme": resolve_theme_full, "get_state": get_state}
                 load_server_router(module_path, item, prefix=module_type, dependencies=public_deps, router_type=module_type, path_modifier="public", verbose=VERBOSE)

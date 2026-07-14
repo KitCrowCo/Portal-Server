@@ -102,7 +102,7 @@
                             <a href='/logout' class='nav-link' style='opacity:0.7;'>Logout</a>
                         </div>
                     {% endset %}
-                    {{ UI.toolbar(side="left", content=main_sidebar_content, size="18rem", overlay=True, start_open=True, id="Main-left-bar", resizable=True, nesting_level = -1)|safe }}
+                    {{ UI.toolbar(side="left", content=main_sidebar_content, size="18rem", overlay=True, start_open=False, id="Main-left-bar", resizable=True, nesting_level = -1)|safe }}
                 {% endif %}
 
 <!-- Not an orphan, just splits html tags, this is for the first 'if lvl == 0' -->
@@ -116,20 +116,19 @@
                         .CodeMirror-cursor {border-left:var(--border-thick) solid var(--accent) !important;}
                         .cm-s-default .cm-keyword {color:var(--cm-accent) !important;}
                         .cm-s-default .cm-comment {color:var(--text_muted) !important; font-style:italic !important;}
-                        .cm-s-default .cm-type    {color:#4ec9b0 !important;}
-                        .cm-s-default .cm-string  {color:#7600ff !important;}
-                        .cm-s-default .cm-number  {color:#b5cea8 !important;}
-                        .cm-s-default .cm-def     {color:#9cdcfe !important;}
-                        .cm-s-default .cm-variable{color:#c8e0f0 !important;}
+                        .cm-s-default .cm-type {color:#4ec9b0 !important;}
+                        .cm-s-default .cm-string {color:#7600ff !important;}
+                        .cm-s-default .cm-number {color:#b5cea8 !important;}
+                        .cm-s-default .cm-def {color:#9cdcfe !important;}
+                        .cm-s-default .cm-variable {color:#c8e0f0 !important;}
                         .cm-s-default .cm-builtin {color:#4ec9b0 !important;}
-                        .cm-s-default .cm-atom    {color:#a8d8a8 !important;}
+                        .cm-s-default .cm-atom {color:#a8d8a8 !important;}
                         .CodeMirror-selected {background:rgba(100,180,255,0.2) !important;}
                         .CodeMirror-linenumber {color:var(--text_muted) !important;}
                     {% endif %}
                 </style>
             {% endif %}
             <div class="app-shell" data-shell="{{ lvl }}" data-im-scope="{{ shell_uuid }}" style="height:100%; width:100%; position:relative; grid-area:center;{% if theme_diff %}{% for k,v in theme_diff.items() %}--{{ k }}: {{ v }};{% endfor %}{% endif %}">
-            <!-- <div class="app-shell" data-shell="{{ lvl }}" data-im-scope="{{ shell_uuid }}" style="height:100%; width:100%; position:relative; grid-area:center;" > -->
                 {% if toolbars %}{% for _,v in toolbars.items() %}{{ v|safe }}{% endfor %}{% endif %}
                 <div id="content-{{ shell_uuid }}" class="content">
                     {% block content %}{{ content|safe }}{% endblock %}
@@ -156,7 +155,6 @@
                 htmx.config.allowScriptTags = true;
 
                 function repositionRecallBtns() {
-                    // Hoist bySide out of the shell loop so buttons across ALL nesting levels stack properly
                     var bySide = {left: [], right: [], top: [], bottom: []};
 
                     document.querySelectorAll('[data-shell]').forEach(function(shell) {
@@ -173,7 +171,6 @@
                         items.forEach(function(item, idx) {
                             var isOpen = item.bar.classList.contains('active');
                             var size = item.bar.dataset.size || '18rem';
-                            // Subtract ~2rem for the button width to ensure it never gets pushed off a narrow mobile screen
                             var viewMax = (side === 'top' || side === 'bottom') ? '100vh' : '100vw';
                             var clamped = 'min(' + size + ', calc(' + viewMax + ' - 2rem))';
                             var off = 'calc(0.2rem + ' + (idx * 2.5) + 'rem)';
@@ -196,7 +193,7 @@
                     updateLayout(bar.closest('[data-shell]'));
                     repositionRecallBtns();
                 }
-                
+
                 function updateLayout(shell) {
                     const targets = shell ? [shell] : document.querySelectorAll('[data-shell]');
                     targets.forEach(function(s) {
@@ -208,12 +205,12 @@
                         for (const [k,v] of Object.entries(sz)) s.style.setProperty('--' + k + '-size', v);
                     });
                 }
-                
+
                 document.body.addEventListener('htmx:configRequest', function(e) {
                     var t = e.detail.parameters && e.detail.parameters.type;
                     if (t && /_(focus_tab|open_tab|close_tab)$/.test(t)) document.dispatchEvent(new CustomEvent('im:tab-flush'));
                 });
-                
+
                 function UI_closeModal(id) {
                     var el = document.getElementById('backdrop-' + id);
                     if (el) { var slot = el.parentElement; el.remove(); if (slot && slot.id) slot.innerHTML = ''; }

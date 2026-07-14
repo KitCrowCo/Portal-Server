@@ -1985,42 +1985,43 @@ class ImageGallery:
     .igal-thumb-wrap img { width: 100%; height: 100%; object-fit: contain;}
     """
 
-    SCRIPT = """
-if(!window._igalKeysBound){
-    window._igalKeysBound = true;
-    document.addEventListener('keydown', function(e){
-        var lb = document.querySelector('.igal-lightbox');
-        if(lb){
-            if(e.key==='ArrowLeft'){ var p=lb.querySelector('.igal-lb-nav.prev'); if(p) p.click(); }
-            else if(e.key==='ArrowRight'){ var n=lb.querySelector('.igal-lb-nav.next'); if(n) n.click(); }
-            else if(e.key==='Escape'){ var slot=lb.closest('div[id^="igal-lightbox-slot-"]'); if(slot) slot.innerHTML=''; }
-            return;
-        }
-        if(e.key==='Delete' || e.key==='Backspace'){
-            var grid = document.activeElement && document.activeElement.closest('[id^="igal-grid-"]');
-            if(!grid) return;
-            var checked = grid.querySelectorAll('input[name=delete_targets]:checked');
-            if(!checked.length) return;
-            e.preventDefault();
-            var p = grid.id.replace('igal-grid-','');
-            if(confirm('Delete '+checked.length+' selected item(s)?')) igalDeleteChecked(p);
-        }
-    });
-}
-function igalCheckedTargets(p){ return Array.from(document.querySelectorAll('#igal-grid-'+p+' input[name=delete_targets]:checked')).map(function(c){return c.value;}); }
-function igalDeleteChecked(p){
-    var dir = document.querySelector('#igal-crumbs-'+p+' [data-active-dir]');
-    htmx.ajax('POST','/im/in',{values:{type:p+'_delete', branch:p, lvl:2, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
-}
+#     SCRIPT = """
+# if(!window._igalKeysBound){
+#     window._igalKeysBound = true;
+#     document.addEventListener('keydown', function(e){
+#         var lb = document.querySelector('.igal-lightbox');
+#         if(lb){
+#             if(e.key==='ArrowLeft'){ var p=lb.querySelector('.igal-lb-nav.prev'); if(p) p.click(); }
+#             else if(e.key==='ArrowRight'){ var n=lb.querySelector('.igal-lb-nav.next'); if(n) n.click(); }
+#             else if(e.key==='Escape'){ var slot=lb.closest('div[id^="igal-lightbox-slot-"]'); if(slot) slot.innerHTML=''; }
+#             return;
+#         }
+#         if(e.key==='Delete' || e.key==='Backspace'){
+#             var grid = document.activeElement && document.activeElement.closest('[id^="igal-grid-"]');
+#             if(!grid) return;
+#             var checked = grid.querySelectorAll('input[name=delete_targets]:checked');
+#             if(!checked.length) return;
+#             e.preventDefault();
+#             var p = grid.id.replace('igal-grid-','');
+#             if(confirm('Delete '+checked.length+' selected item(s)?')) igalDeleteChecked(p);
+#         }
+#     });
+# }
+# function igalCheckedTargets(p){ return Array.from(document.querySelectorAll('#igal-grid-'+p+' input[name=delete_targets]:checked')).map(function(c){return c.value;}); }
+# function igalDeleteChecked(p){
+#     var dir = document.querySelector('#igal-crumbs-'+p+' [data-active-dir]');
+#     htmx.ajax('POST','/im/in',{values:{type:p+'_delete', branch:p, lvl:2, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
+# }
 
-function igalMoveConfirm(p, dir){
-    var checked = document.querySelector('#modal-igal-move-'+p+' input[name=parent]:checked');
-    var typed = document.getElementById('igal-mv-new-'+p).value.trim();
-    var dest = typed || (checked ? checked.value : '');
-    htmx.ajax('POST','/im/in',{values:{type:p+'_move', branch:p, lvl:2, dir:dir, name:dest, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
-    UI_closeModal('igal-move-'+p);
-}
-"""
+# function igalMoveConfirm(p, dir){
+#     var checked = document.querySelector('#modal-igal-move-'+p+' input[name=parent]:checked');
+#     var typed = document.getElementById('igal-mv-new-'+p).value.trim();
+#     var dest = typed || (checked ? checked.value : '');
+#     htmx.ajax('POST','/im/in',{values:{type:p+'_move', branch:p, lvl:2, dir:dir, name:dest, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
+#     UI_closeModal('igal-move-'+p);
+# }
+# """
+    # <script>{self.SCRIPT}</script>
 
     IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
@@ -2039,6 +2040,7 @@ function igalMoveConfirm(p, dir){
             self.IM.scripts[f"{p}_meta"] = [self._intent_meta]
             self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
             self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
+            self.IM.scripts[f"{p}_key"] = [self._im_key]
 
     def _data_uri(self, rel: str) -> str:
         """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
@@ -2064,7 +2066,7 @@ function igalMoveConfirm(p, dir){
 
     def render_shell(self, rel_dir: str = "", include_css: bool = True) -> str:
         style_tag = f"<style>{self.CSS}</style>" if include_css else ""
-        return f"""{style_tag}<script>{self.SCRIPT}</script><div class="igal-shell" id="igal-shell-{self.intent_prefix}">
+        return f"""{style_tag}<div class="igal-shell" id="igal-shell-{self.intent_prefix}">
             {self._crumbs_html(rel_dir)}
             <div class="igal-grid" id="igal-grid-{self.intent_prefix}" tabindex="0">{self.grid_html(rel_dir)}</div>
             <div id="igal-lightbox-slot-{self.intent_prefix}"></div>
@@ -2206,5 +2208,21 @@ function igalMoveConfirm(p, dir){
         rel_dir = payload.get("dir", "")
         if targets: self.fm.batch_delete(targets)
         return await self._im_browse(request, payload, imr)
+
+    async def _im_key(self, request, payload, imr):
+        key = payload.get("key", "")
+        rel_dir = payload.get("dir", "")  # element_scope carries current dir if you set data-im-scope on the grid
+        if key in ("ArrowLeft", "ArrowRight"):
+            if payload.get("element_role") != "lightbox": return imr
+            idx = int(payload.get("index", 0)) + (-1 if key == "ArrowLeft" else 1)
+            return await self._im_lightbox(request, {"dir": rel_dir, "index": idx}, imr)
+        if key == "Escape":
+            imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}"></div>')
+            return imr
+        if key in ("Delete", "Backspace") and payload.get("element_role") == "grid":
+            targets = _parse_targets(payload.get("selected", []))
+            if targets: self.fm.batch_delete(targets)
+            return await self._im_browse(request, {"dir": rel_dir}, imr)
+        return imr
 
 def _safe(s: str) -> str: return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")

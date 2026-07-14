@@ -23,14 +23,9 @@ const IB = (() => {
     const _sendQueue = [];      // message serialization queue
 
     const UNIVERSAL = [
-        { id:'select_all',     icon:'&#x25A3;', label:'All',   fn:() => {if (!_cmCmd('selectAll')) document.execCommand('selectAll'); } },
-        { id:'copy',           icon:'&#x2398;', label:'Copy',  fn:() => {if (!_cmCmd('copy')) {document.execCommand('copy'); const sel = window.getSelection()?.toString(); if (sel) clipboard.copy(sel);}}},
-        { id:'paste',          icon:'&#x2399;', label:'Paste', fn:() => {
-            if (!_cmCmd('paste')) clipboard.paste(t => {
-                const el = _getFocus(); if (!el) return;
-                if ('value' in el) {const s = el.selectionStart; el.value = el.value.slice(0, s) + t + el.value.slice(el.selectionEnd); el.selectionStart = el.selectionEnd = s + t.length;} else document.execCommand('insertText', false, t);
-            });
-        }},
+        { id:'select_all',     icon:'&#x25A3;', label:'All',   fn:() => { if (!_cmCmd('selectAll')) document.execCommand('selectAll'); } },
+        { id:'copy',           icon:'&#x2398;', label:'Copy',  fn:() => { if (!_cmCmd('copy')) {document.execCommand('copy'); const sel = window.getSelection()?.toString(); if (sel) clipboard.copy(sel);}}},
+        { id:'paste',          icon:'&#x2399;', label:'Paste', fn:() => { if (!_cmCmd('paste')) clipboard.paste(t => { const el = _getFocus(); if (!el) return; if ('value' in el) {const s = el.selectionStart; el.value = el.value.slice(0, s) + t + el.value.slice(el.selectionEnd); el.selectionStart = el.selectionEnd = s + t.length;} else document.execCommand('insertText', false, t); }); }},
         { id:'clip_pull',      icon:'&#x2BD1;', label:'Pull',  fn:() => clipboard.pullFromBrowser() },
         { id:'undo',           icon:'&#x21B6;', label:'Undo',  fn:() => { if (!_cmCmd('undo')) document.execCommand('undo'); } },
         { id:'redo',           icon:'&#x21B7;', label:'Redo',  fn:() => { if (!_cmCmd('redo')) document.execCommand('redo'); } },
@@ -38,9 +33,7 @@ const IB = (() => {
         { id:'arrow_down',     icon:'&#x25BC;', label:'Down',  fn:() => _simKey('ArrowDown') },
         { id:'arrow_left',     icon:'&#x25C4;', label:'Left',  fn:() => _simKey('ArrowLeft') },
         { id:'arrow_right',    icon:'&#x25BA;', label:'Right', fn:() => _simKey('ArrowRight') },
-        { id:'menu',           icon:'&#x2630;', label:'Menu',  fn:() => { const el = _getFocus(); if (!el) return;
-            const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles:true, cancelable:true, clientX:r.left+r.width/2, clientY:r.top+r.height/2 }));
-        }},
+        { id:'menu',           icon:'&#x2630;', label:'Menu',  fn:() => { const el = _getFocus(); if (!el) return; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles:true, cancelable:true, clientX:r.left+r.width/2, clientY:r.top+r.height/2 })); }},
         { id:'enter',          icon:'&#x23CE;', label:'Enter', fn:() => _simKey('Enter') },
         { id:'escape',         icon:'&#x238B;', label:'Esc',   fn:() => _simKey('Escape') },
         { id:'tab_key',        icon:'&#x21E5;', label:'Tab',   fn:() => _simKey('Tab') },
@@ -64,26 +57,23 @@ const IB = (() => {
 
     // -- Element Targeting --
     function _imTarget(e) { if (e.target.closest('[data-im-bridge]')) return null; return e.target.closest('[data-im-role], [data-im-id]') || null; }
-
     function _elData(el) {
         if (!el) return { id: '', role: '', scope: '' };
         return { id: el.dataset?.imId || el.id || '', role: el.dataset?.imRole || '', scope: el.dataset?.imScope || '' };
     }
-
     function _elAt(x, y, exclude) { for (const el of document.elementsFromPoint(x, y)) { if (el === exclude) continue; if (el.dataset?.imRole || el.dataset?.imId || el.id) return el; } return null; }
-
     function _shellContext(el) {
         const s = (el && el.closest('[data-shell]')) || document.querySelector('[data-shell]');
         if (!s) return {lvl: '1', branch: ''};
         return { lvl: s.getAttribute('data-shell') || '1', branch: s.getAttribute('data-im-scope') || '' };
     }
-
     function _report(primitive, el, extra = {}) {
         const d = _elData(el);
         const ctx = _shellContext(el);
+        const readSel = el.dataset.imRead;
+        if (readSel) extra.selected = Array.from(el.querySelectorAll(readSel)).filter(c => c.checked).map(c => c.value);
         htmx.ajax('POST', '/im/in', {values: { type: primitive, element_id: d.id, element_role: d.role, element_scope: d.scope, t: Date.now(), ...ctx, ...extra }, swap: 'none'});
     }
-
     // -- Pointer Event Detection --
     document.addEventListener('pointerdown', e => {
         if (e.button && e.button > 0) return;
@@ -94,7 +84,6 @@ const IB = (() => {
         _killDrag = false;
         if (_cfg.long_press) { _lpTimer = setTimeout(() => { if (_pd && !_drag) { _lpTimer = null; _report('long_press', _pd.el); _pd = null; } }, LP_DELAY); }
     });
-
     document.addEventListener('pointermove', e => {
         if (!_pd || e.pointerId !== _pd.pointerId || _drag) return;
         if (Math.hypot(e.clientX - _pd.x0, e.clientY - _pd.y0) < DRAG_THRESHOLD) return;
@@ -103,7 +92,6 @@ const IB = (() => {
         if (_killDrag) { _pd = null; return; }
         _report('drag_start', _pd.el, { t_start: _pd.t0 });
     });
-
     document.addEventListener('pointerup', e => {
         clearTimeout(_lpTimer); _lpTimer = null;
         if (!_pd || e.pointerId !== _pd.pointerId) return;
@@ -133,60 +121,51 @@ const IB = (() => {
         } else if (_cfg.double_tap) { _dtTimer = setTimeout(() => { _dtTimer = null; _report('tap', el); }, DT_WINDOW);
         } else { _report('tap', el); }
     });
-
     function _processFormSubmission(triggerEl, formEl) {
         let actionEl = triggerEl;
         if (formEl && triggerEl.tagName !== 'BUTTON') { actionEl = formEl.querySelector('button[type="submit"]') || triggerEl; }
         const ctx = _shellContext(actionEl);
-        let data = {
-            type: 'submit',
-            element_id: actionEl.id || actionEl.name || actionEl.dataset?.imId || '',
-            element_role: actionEl.dataset?.imRole || (actionEl.tagName === 'BUTTON' ? 'button' : 'input'),
-            element_scope: actionEl.dataset?.imScope || '',
-            ...ctx
-        };
+        let data = { type: 'submit', element_id: actionEl.id || actionEl.name || actionEl.dataset?.imId || '', element_role: actionEl.dataset?.imRole || (actionEl.tagName === 'BUTTON' ? 'button' : 'input'), element_scope: actionEl.dataset?.imScope || '', ...ctx };
         if (formEl) { new FormData(formEl).forEach((v, k) => { data[k] = v; });
         } else if ('value' in triggerEl) { const key = triggerEl.name || triggerEl.id || 'value'; data[key] = triggerEl.value; }
         if (!wsSend(data)) { htmx.ajax('POST', '/im/in', { values: data, swap: 'none' }); }
         if (formEl) { const txt = formEl.querySelector('textarea, input[type="text"]'); if (txt) { txt.value = ''; if (txt.style.height) txt.style.height = 'auto'; }
         } else if (triggerEl.tagName === 'TEXTAREA' || triggerEl.tagName === 'INPUT') { triggerEl.value = ''; if (triggerEl.style.height) triggerEl.style.height = 'auto'; }
     }
-
     document.addEventListener('pointercancel', () => { clearTimeout(_lpTimer); _lpTimer = null; _pd = null; _drag = false; });
     document.addEventListener('focusin', e => { const el = e.target.closest('[data-im-role], [data-im-id]'); if (el && el.tagName !== 'BUTTON') { _report('focus_change', el, { scroll_top: el.scrollTop, scroll_left: el.scrollLeft });}});
-
     // -- Keyboard Channel --
     document.addEventListener('keydown', e => {
         const focused = document.activeElement;
         if (!focused || focused === document.body) return;
-
-        // 1. Keyboard Drags
+        // Keyboard Drags
         if (e.altKey && ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
             e.preventDefault();
             if (!_kbDrag) { _kbDrag = { el: focused, t0: Date.now() }; _report('drag_start', focused, { t_start: _kbDrag.t0, source: 'keyboard' }); }
             return;
         }
-        // 2. Transformed Actions (Enter Key Routing)
+        const keyEl = e.target.closest('[data-im-keys]');
+        if (keyEl && keyEl.dataset.imKeys.split(/\s+/).includes(e.key)) {
+            e.preventDefault();
+            _report('key', keyEl, { key: e.key });
+            return;
+        }
+        // Transformed Actions (Enter Key Routing)
         if (e.key === 'Enter') {
             // CASE A: Command Modifier (Ctrl+Enter / Meta+Enter) -> Mirror Physical Send Button Tap
             if (e.ctrlKey || e.metaKey) {
-                if (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA') { 
-                    
-                    // NEW: Let the dedicated CHAT_SCRIPT handle its own chat inputs
-                    if (focused.classList.contains('cm-input')) return; 
-
+                if (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA') {
+                    if (focused.classList.contains('cm-input')) return;
                     e.preventDefault();
                     const form = focused.closest('form') || focused.form;
                     if (form) {
                         const sendBtn = form.querySelector('.cm-send') || form.querySelector('button[type="submit"]');
-                        // FIX: Natively click the button so HTMX naturally intercepts the submission
-                        if (sendBtn) { sendBtn.click(); return; } 
+                        if (sendBtn) { sendBtn.click(); return; }
                     }
                     _processFormSubmission(focused, form);
                     return;
                 }
             }
-
             // CASE B: Plain Enter Key -> Mapped to Gesture Tap
             if (!e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !_kbDrag) {
                 if (_cfg.double_tap && _dtTimer) { clearTimeout(_dtTimer); _dtTimer = null; _report('double_tap', focused);
@@ -195,7 +174,7 @@ const IB = (() => {
                 return;
             }
         }
-        // 3. Virtual Pointer Controls
+        // Virtual Pointer Controls
         if (_cfg.pointer && !e.altKey && ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
             e.preventDefault();
             const delta = { ArrowUp:[0,-VP_STEP], ArrowDown:[0,VP_STEP], ArrowLeft:[-VP_STEP,0], ArrowRight:[VP_STEP,0] }[e.key];
@@ -204,7 +183,6 @@ const IB = (() => {
         }
         if (_cfg.pointer && e.key === 'Enter' && !e.altKey) { const el = document.elementFromPoint(_vp.x, _vp.y); if (el) _report('tap', el); }
     });
-
     document.addEventListener('keyup', e => {
         if (!e.altKey && _kbDrag) {
             const { el, t0 } = _kbDrag;
@@ -216,10 +194,8 @@ const IB = (() => {
             _report('drag_end', el, { target_id: _elData(target).id, t_start: t0, t_end, source: 'keyboard' });
         }
     });
-
     // -- Virtual Pointer Nodes --
     function _vpEl() { return document.getElementById('im-vpointer'); }
-
     function _vpMove(x, y) {
         _vp.x = Math.max(4, Math.min(x, window.innerWidth  - 4));
         _vp.y = Math.max(4, Math.min(y, window.innerHeight - 4));
@@ -227,13 +203,11 @@ const IB = (() => {
         const el = document.elementFromPoint(_vp.x, _vp.y);
         if (el !== _vp.el) { _vp.el?.classList.remove('im-pointer-hover'); _vp.el = el; el?.classList.add('im-pointer-hover'); }
     }
-
     function _vpSetActive(on) {
         const dot = _vpEl(); if (dot) dot.style.display = on ? 'block' : 'none';
         if (on) _vpMove(_vp.x || window.innerWidth / 2, _vp.y || window.innerHeight / 2);
         else _vp.el?.classList.remove('im-pointer-hover');
     }
-
     function _vpInit() {
         if (document.getElementById('im-vpointer')) return;
         const dot = document.createElement('div');
@@ -241,7 +215,6 @@ const IB = (() => {
         dot.style.cssText = `position:fixed; width:1.4rem; height:1.4rem; border-radius:50%; border:0.2rem solid var(--accent,#4af); background:transparent; pointer-events:none; z-index:9999; display:none; transform:translate(-50%,-50%); transition:left 0.04s,top 0.04s;`;
         document.body.appendChild(dot);
     }
-
     let _tpTouch = null;
     function _wireTrackpad(el) {
         el.addEventListener('touchstart', e => {
@@ -264,7 +237,6 @@ const IB = (() => {
             if (el) _report('tap', el);
         });
     }
-
     // -- Clipboard Middleware --
     const clipboard = {
         copy(text) { _cbValue = text; htmx.ajax('POST', '/im/intent', { values: { type: 'clipboard_set', value: text }, swap: 'none' }); navigator.clipboard?.writeText(text).catch(() => {}); },
@@ -274,7 +246,6 @@ const IB = (() => {
         },
         pullFromBrowser() { navigator.clipboard?.readText().then(text => { if (text) this.copy(text); }).catch(() => {}); },
     };
-
     function _getFocus() { return document.activeElement !== document.body ? document.activeElement : null; }
     function _simKey(key, opts = {}) { const el = _getFocus(); if (!el) return; ['keydown','keypress','keyup'].forEach(t => el.dispatchEvent(new KeyboardEvent(t, { key, bubbles: true, cancelable: true, ...opts }))); }
     function _cmCmd(cmd) {
@@ -283,7 +254,6 @@ const IB = (() => {
         const w = el.closest?.('.CodeMirror'); if (w?.CodeMirror) { w.CodeMirror.execCommand(cmd); return true; }
         return false;
     }
-
     // -- WebSocket Processing --
     function wsHandler(raw) {
         let d;
@@ -332,9 +302,10 @@ const IB = (() => {
             }
             case 'clipboard_sync': { _cbValue = d.value ?? null; break; }
             case 'cfg': { Object.assign(_cfg, d.values || {}); _vpSetActive(_cfg.pointer); break; }
+            case 'pipeline_event': { document.dispatchEvent(new CustomEvent('pipeline:' + d.event, { detail: { job_id: d.job_id, ...d.payload } })); break; }
+            case 'pipeline_stream': { document.dispatchEvent(new CustomEvent('pipeline:stream', { detail: { job_id: d.job_id, key: d.key, delta: d.delta } })); break; }
         }
     }
-
     // -- Component Generation --
     function _makeBtn(action) {
         const btn = document.createElement('button');
@@ -351,7 +322,6 @@ const IB = (() => {
         });
         return btn;
     }
-
     function _render() {
         const bar = document.getElementById('im-bridge-bar'); if (!bar) return;
         bar.innerHTML = '';
@@ -361,7 +331,6 @@ const IB = (() => {
         uG.style.cssText = 'display:flex;align-items:center;gap:0.1rem;flex-shrink:0;border-right:var(--board-thick,0.1rem) solid var(--border);padding-right:0.3rem;margin-right:0.2rem;';
         UNIVERSAL.forEach(a => uG.appendChild(_makeBtn(a)));
         bar.appendChild(uG);
-
         if (_modActions.length) {
             const mG = document.createElement('div');
             mG.id = 'im-bridge-module-actions';
@@ -370,7 +339,6 @@ const IB = (() => {
             _modActions.forEach(a => { const r = typeof a === 'string' ? _uByID[a] : a; if (r) mG.appendChild(_makeBtn(r)); });
             bar.appendChild(mG);
         }
-
         const tp = document.createElement('div');
         tp.id = 'im-trackpad';
         tp.dataset.imBridge = '1';
@@ -380,9 +348,7 @@ const IB = (() => {
         _wireTrackpad(tp);
         bar.appendChild(tp);
     }
-
     const _oobSeen = new Set();
-
     function _processOOB(html) {
         var tmp = document.createElement('div');
         tmp.innerHTML = html;
@@ -412,7 +378,7 @@ const IB = (() => {
                     }
                     if (target.classList.contains('cm-msgs') && target.dataset.pinned === 'true')
                         requestAnimationFrame(function(){ target.scrollTo({top: target.scrollHeight, behavior: 'smooth'}); });
-                } else { 
+                } else {
                     var fresh = el.cloneNode(true); fresh.removeAttribute('hx-swap-oob');
                     target.replaceWith(fresh);
                     var refound = document.getElementById(tid);
@@ -421,19 +387,16 @@ const IB = (() => {
             } catch(err) { console.warn('[IB] OOB swap error:', tid, err); }
         });
     }
-
     function wsSend(data) {
         if (_ws && _ws.readyState === 1) { _ws.send(typeof data === 'string' ? data : JSON.stringify(data)); return true; }
         if (_ws && _ws.readyState === 0) { _sendQueue.push(data); return true; } 
         return false;
     }
-
     function attachWS(socket) {
         _ws = socket;
         socket.addEventListener('message', e => wsHandler(e.data));
         socket.addEventListener('open', function() { while (_sendQueue.length && _ws && _ws.readyState === 1) _ws.send(typeof _sendQueue[0] === 'string' ? _sendQueue.shift() : JSON.stringify(_sendQueue.shift())); });
     }
-
     // -- Public Framework API Surface --
     function toggle() {
         _open = !_open;
@@ -443,10 +406,8 @@ const IB = (() => {
         if (btn) btn.innerHTML = (_open ? '&#x2304;' : '&#x2303;') + ' Bridge';
         htmx.ajax('POST', '/im/intent', { values: { type: 'set_bridge', open: String(_open) }, swap: 'none' });
     }
-
     function setModuleActions(actions) { _modActions = actions || []; _render(); }
     function cfg(key, val) { _cfg[key] = val; if (key === 'pointer') _vpSetActive(val);}
-
     function init() {
         _vpInit();
         _render();
