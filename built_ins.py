@@ -154,7 +154,9 @@ MD_BLOCK_CSS = r"""
 .md-details[open] summary::before { transform: rotate(90deg); }
 .md-details-body{padding:.4rem .8rem .6rem;border-top:var(--border-thick) solid var(--border);}
 .md-task-done{text-decoration:line-through; opacity:.55;}
-h1, h2, h3 { border-bottom: var(--border-thick) solid var(--border); padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
+h1 { border-bottom: calc(var(--border-thick) * 2) solid var(--border); padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
+h2 { border-bottom: calc(var(--border-thick) * 1.5) solid var(--border); padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
+h3 { border-bottom: var(--border-thick) solid var(--border); padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
 .code-block-wrap{position:relative;}
 .code-block{position:relative;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;}
 .code-block code,.cm-readonly-block{white-space:inherit;}
@@ -242,12 +244,18 @@ MD_LIVE_OVERLAY_JS = """
 const MD_LIVE = (() => {
     function overlay() {
         return {
-            token: function(stream) {
-                if (stream.sol()) { var h = stream.match(/^(#{1,6})\\s+/); if (h) { stream.skipToEnd(); return 'md-heading md-h' + h[1].length; }}
-                if (stream.match(/^\\*\\*[^*\\n]+\\*\\*/)) return 'md-strong';
-                if (stream.match(/^\\*[^*\\n]+\\*/)) return 'md-em';
-                if (stream.match(/^`[^`\\n]+`/)) return 'md-code';
-                if (stream.match(/^\\[[^\\]]*\\]\\([^)]*\\)/)) return 'md-link';
+            startState: function() { return { inFence: false }; },
+            token: function(stream, state) {
+                if (stream.sol()) { if (stream.match(/^```/)) { state.inFence = !state.inFence; return 'md-code'; } }
+                if (state.inFence) { stream.skipToEnd(); return 'md-code'; }
+                if (stream.sol()) {
+                    var h = stream.match(/^(#{1,6})\s+/); if (h) { stream.skipToEnd(); return 'md-heading md-h' + h[1].length; }
+                    if (stream.match(/^(---|\*\*\*|___)\s*$/)) { stream.skipToEnd(); return 'md-hr'; }
+                }
+                if (stream.match(/^\*\*[^*\n]+\*\*/)) return 'md-strong';
+                if (stream.match(/^\*[^*\n]+\*/)) return 'md-em';
+                if (stream.match(/^`[^`\n]+`/)) return 'md-code';
+                if (stream.match(/^\[[^\]]*\]\([^)]*\)/)) return 'md-link';
                 stream.next();
                 return null;
             }
@@ -263,6 +271,7 @@ const MD_LIVE = (() => {
 MD_LIVE_CSS = """
 .cm-md-marker{opacity:.4;}
 .cm-md-heading{font-weight:700;}
+.cm-md-hr{opacity:.5; letter-spacing:.2em;}
 .cm-md-h1{font-size:1.7em;}
 .cm-md-h2{font-size:1.4em;}
 .cm-md-h3{font-size:1.2em;}
@@ -317,7 +326,8 @@ def _render_list_blocks(text: str, task_interactive: bool, task_counter: list) -
                 checked = task.lower() == 'x'; idx = task_counter[0]; task_counter[0] += 1
                 cls = ' class="md-task-done"' if checked else ""
                 attrs = f"""data-task-idx="{idx}" onclick="this.dispatchEvent(new CustomEvent('md-task-toggle',{{bubbles:true,detail:{{idx:{idx}}}}}))" style='margin-right:.4rem;cursor:pointer;'""" if task_interactive else 'disabled style="margin-right:.4rem;"'
-                block.append(f'<li style="list-style:none;"><input type="checkbox" {"checked " if checked else ""}{attrs}><span{cls}>{content}</span></li>')
+                del_btn = f"""<span onclick="event.stopPropagation();this.dispatchEvent(new CustomEvent('md-task-delete',{{bubbles:true,detail:{{idx:{idx}}}}}))" style="margin-left:.4rem;opacity:.4;cursor:pointer;font-size:.8em" title="Delete item">&#x2715;</span>""" if task_interactive else ""
+                block.append(f'<li style="list-style:none;"><input type="checkbox" {"checked " if checked else ""}{attrs}><span{cls}>{content}</span>{del_btn}</li>')
             else:
                 block.append(f'<li>{content}</li>')
             i += 1
@@ -375,6 +385,47 @@ def md_plus_transpiler(text: str, mode: str = "extended", fix_mojibake: bool = T
         return out
 
     text = "\n".join(_extract_details(text.split("\n")))
+
+    # --- Server-side Tabset Compiler (Zero JS) ---
+    # A {.tabset} header opens a tab group. It closes at: an explicit {end.tabset} marker line, the next header whose level is <= its own, or end of document.
+    # Processed deepest level first so a nested tabset's marker becomes an opaque stashed token before the enclosing (shallower) level's boundary search runs.
+    tabset_counter = [0]
+    doc_prefix = doc_id if doc_id else "static"
+    _tabset_end_re = re.compile(r'^\{end\.tabset\}[ \t]*\n?', re.M)
+    for level in range(5, 0, -1):
+        hashes = '#' * level
+        marker_re = re.compile(rf'^{hashes}[ \t]+(.*?)[ \t]+\{{\.tabset\}}[ \t]*$\n?', re.M)
+        boundary_re = re.compile(rf'^(?:#{{1,{level}}}[ \t]|\{{end\.tabset\}}[ \t]*$)', re.M)
+        out, pos = [], 0
+        for m in marker_re.finditer(text):
+            if m.start() < pos: continue
+            out.append(text[pos:m.start()])
+            body_start = m.end()
+            b = boundary_re.search(text, body_start)
+            body_end = b.start() if b else len(text)
+            inner_content = text[body_start:body_end]
+            child_hashes = '#' * (level + 1)
+            parts = re.split(rf'^{child_hashes}[ \t]+(.+)$', inner_content, flags=re.M)
+            if len(parts) < 3:
+                out.append(f"{hashes} {m.group(1).strip()}\n")
+                out.append(inner_content)
+                pos = b.end() if (b and _tabset_end_re.match(text, b.start())) else body_end
+                continue
+            t_idx = tabset_counter[0]; tabset_counter[0] += 1
+            html_parts = ['<div class="md-tabset">']
+            for child_idx, i in enumerate(range(1, len(parts), 2)):
+                title_str, body_str = parts[i].strip(), parts[i+1]
+                rendered_body = md_plus_transpiler(body_str, mode=mode, fix_mojibake=False, code_mirror=code_mirror, loose_breaks=loose_breaks, enable_graphviz=enable_graphviz, enable_latex=enable_latex, theme=theme, **kwargs)
+                tab_id, group_name = f"tab-{doc_prefix}-{t_idx}-{child_idx}", f"tabset-{doc_prefix}-{t_idx}"
+                clean_title = re.sub(r'\{[#\.][\w-]+\}', '', title_str).strip()
+                html_parts.append(f'<input type="radio" id="{tab_id}" name="{group_name}"{" checked" if child_idx == 0 else ""}>')
+                html_parts.append(f'<label class="md-tab-btn" for="{tab_id}">{clean_title}</label>')
+                html_parts.append(f'<div class="md-tab-pane">{rendered_body}</div>')
+            html_parts.append('</div>')
+            out.append(_stash_block("\n".join(html_parts)))
+            pos = b.end() if (b and _tabset_end_re.match(text, b.start())) else body_end
+        out.append(text[pos:])
+        text = "".join(out)
 
     if enable_graphviz: text = re.sub(r'```dot\n(.*?)\n```', lambda m: _stash_block(render_graphviz_block(m.group(1), theme)), text, flags=re.S)
 
@@ -435,47 +486,6 @@ def md_plus_transpiler(text: str, mode: str = "extended", fix_mojibake: bool = T
         text = re.sub(r'\(\(col\)\)', '<div style="display:flex; flex-direction:column; gap:0.5rem;">', text)
         text = re.sub(r'\(\(grid:\s*(\d+)\)\)', r'<div style="display:grid; grid-template-columns:repeat(\1,1fr); gap:1rem;">', text)
         text = re.sub(r'\(\(\)\)', '</div>', text)
-
-    # --- Server-side Tabset Compiler (Zero JS) ---
-    # A {.tabset} header opens a tab group. It closes at: an explicit {end.tabset} marker line, the next header whose level is <= its own, or end of document.
-    # Processed deepest level first so a nested tabset's marker becomes an opaque stashed token before the enclosing (shallower) level's boundary search runs.
-    tabset_counter = [0]
-    doc_prefix = doc_id if doc_id else "static"
-    _tabset_end_re = re.compile(r'^\{end\.tabset\}[ \t]*\n?', re.M)
-    for level in range(5, 0, -1):
-        hashes = '#' * level
-        marker_re = re.compile(rf'^{hashes}[ \t]+(.*?)[ \t]+\{{\.tabset\}}[ \t]*$\n?', re.M)
-        boundary_re = re.compile(rf'^(?:#{{1,{level}}}[ \t]|\{{end\.tabset\}}[ \t]*$)', re.M)
-        out, pos = [], 0
-        for m in marker_re.finditer(text):
-            if m.start() < pos: continue
-            out.append(text[pos:m.start()])
-            body_start = m.end()
-            b = boundary_re.search(text, body_start)
-            body_end = b.start() if b else len(text)
-            inner_content = text[body_start:body_end]
-            child_hashes = '#' * (level + 1)
-            parts = re.split(rf'^{child_hashes}[ \t]+(.+)$', inner_content, flags=re.M)
-            if len(parts) < 3:
-                out.append(f"{hashes} {m.group(1).strip()}\n")
-                out.append(inner_content)
-                pos = b.end() if (b and _tabset_end_re.match(text, b.start())) else body_end
-                continue
-            t_idx = tabset_counter[0]; tabset_counter[0] += 1
-            html_parts = ['<div class="md-tabset">']
-            for child_idx, i in enumerate(range(1, len(parts), 2)):
-                title_str, body_str = parts[i].strip(), parts[i+1]
-                rendered_body = md_plus_transpiler(body_str, mode=mode, fix_mojibake=False, code_mirror=code_mirror, loose_breaks=loose_breaks, enable_graphviz=enable_graphviz, enable_latex=enable_latex, theme=theme, **kwargs)
-                tab_id, group_name = f"tab-{doc_prefix}-{t_idx}-{child_idx}", f"tabset-{doc_prefix}-{t_idx}"
-                clean_title = re.sub(r'\{[#\.][\w-]+\}', '', title_str).strip()
-                html_parts.append(f'<input type="radio" id="{tab_id}" name="{group_name}"{" checked" if child_idx == 0 else ""}>')
-                html_parts.append(f'<label class="md-tab-btn" for="{tab_id}">{clean_title}</label>')
-                html_parts.append(f'<div class="md-tab-pane">{rendered_body}</div>')
-            html_parts.append('</div>')
-            out.append(_stash_block("\n".join(html_parts)))
-            pos = b.end() if (b and _tabset_end_re.match(text, b.start())) else body_end
-        out.append(text[pos:])
-        text = "".join(out)
 
     for n in range(6, 0, -1):
         hashes = '#' * n
@@ -1284,6 +1294,7 @@ class PortalEditor:
             self.IM.scripts[f"{p}_info"] = [self._im_info]
             self.IM.scripts[f"{p}_clean"] = [self._im_clean]
             self.IM.scripts[f"{p}_toggle_task"] = [self._im_toggle_task]
+            self.IM.scripts[f"{p}_delete_task"] = [self._im_delete_task]
 
     def _settings(self, doc: dict, settings = {}) -> dict:
         s = doc.get("settings", {})
@@ -1409,7 +1420,7 @@ class PortalEditor:
         url_save, vals_save = self._get_action_url("save", did)
         dirty_js = f"document.getElementById('editor-dirty-{did}').style.display='inline'"
         clean_js = f"document.getElementById('editor-dirty-{did}').style.display='none'"
-        textarea = f"""<textarea id="doc-textarea-{did}" name="content" class="doc-textarea {wrap_class}" style="{font_size}" oninput="{dirty_js}" onkeydown="peKeydown(event,'{did}')" hx-post="{url_save}" {vals_save} hx-trigger="keyup changed delay:{self.autosave_delay}" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-include="this" hx-on::after-request="{clean_js}">{content_val}</textarea><span id="editor-autosave-{did}" style="display:none"></span>"""
+        textarea = f"""<textarea id="doc-textarea-{did}" name="content" class="doc-textarea {wrap_class}" style="{font_size}" oninput="{dirty_js}" onkeydown="peKeydown(event,'{did}')" hx-post="{url_save}" {vals_save} hx-trigger="keyup changed delay:{self.autosave_delay}, blursave" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-include="this" hx-on::after-request="{clean_js}">{content_val}</textarea><span id="editor-autosave-{did}" style="display:none"></span>"""
         rendered_preview = self.render_preview(doc.get("content",""), zoom = zoom, task_interactive = settings.get("interactive", False), doc_id=did, path=doc.get("path",""), **self.render_kwargs_fn())
         if self.IM:
             # IM-bound editors get live preview updates as an OOB push from the save handler (below) - no standalone trigger needed, which also removes a redundant second network round-trip per keystroke.
@@ -1528,11 +1539,30 @@ class PortalEditor:
         def _flip(m):
             if counter[0] == idx:
                 counter[0] += 1
-                state = m.group(1)
-                return m.group(0).replace(f"[{state}]", "[x]" if state.strip() == "" else "[ ]", 1)
+                new_state = "x" if m.group(2).strip() == "" else " "
+                return f"{m.group(1)}[{new_state}]{m.group(3)}"
             counter[0] += 1
             return m.group(0)
-        return re.sub(r'^\s*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+.*$', _flip, content, flags=re.M)
+        return re.sub(r'^(\s*(?:[-*+]|\d+\.)\s+)\[([ xX])\](.*)$', _flip, content, flags=re.M)
+
+    @staticmethod
+    def _delete_task(content: str, idx: int) -> str:
+        counter = [0]; pat = re.compile(r'^\s*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+.*$'); out = []
+        for line in content.split("\n"):
+            if pat.match(line):
+                if counter[0] == idx: counter[0] += 1; continue
+                counter[0] += 1
+            out.append(line)
+        return "\n".join(out)
+
+    async def _im_delete_task(self, request, payload, imr):
+        doc = await self._get_doc_from_state(request, payload)
+        new_content = self._delete_task(doc.get("content",""), int(payload.get("idx", -1)))
+        if self.fm and self.get_tab:
+            tab = await self.get_tab(request, doc["id"])
+            if tab and tab.get("path"): self.fm.write(tab["path"], new_content)
+        zoom = doc.get("settings", {}).get("zoom", 1.0)
+        return imr.raw(self.render_preview(new_content, zoom=zoom, task_interactive=True, doc_id=doc["id"], path=doc.get("path",""), **self.render_kwargs_fn()))
 
     async def _im_toggle_task(self, request, payload, imr):
         doc = await self._get_doc_from_state(request, payload)
@@ -1955,6 +1985,43 @@ class ImageGallery:
     .igal-thumb-wrap img { width: 100%; height: 100%; object-fit: contain;}
     """
 
+    SCRIPT = """
+if(!window._igalKeysBound){
+    window._igalKeysBound = true;
+    document.addEventListener('keydown', function(e){
+        var lb = document.querySelector('.igal-lightbox');
+        if(lb){
+            if(e.key==='ArrowLeft'){ var p=lb.querySelector('.igal-lb-nav.prev'); if(p) p.click(); }
+            else if(e.key==='ArrowRight'){ var n=lb.querySelector('.igal-lb-nav.next'); if(n) n.click(); }
+            else if(e.key==='Escape'){ var slot=lb.closest('div[id^="igal-lightbox-slot-"]'); if(slot) slot.innerHTML=''; }
+            return;
+        }
+        if(e.key==='Delete' || e.key==='Backspace'){
+            var grid = document.activeElement && document.activeElement.closest('[id^="igal-grid-"]');
+            if(!grid) return;
+            var checked = grid.querySelectorAll('input[name=delete_targets]:checked');
+            if(!checked.length) return;
+            e.preventDefault();
+            var p = grid.id.replace('igal-grid-','');
+            if(confirm('Delete '+checked.length+' selected item(s)?')) igalDeleteChecked(p);
+        }
+    });
+}
+function igalCheckedTargets(p){ return Array.from(document.querySelectorAll('#igal-grid-'+p+' input[name=delete_targets]:checked')).map(function(c){return c.value;}); }
+function igalDeleteChecked(p){
+    var dir = document.querySelector('#igal-crumbs-'+p+' [data-active-dir]');
+    htmx.ajax('POST','/im/in',{values:{type:p+'_delete', branch:p, lvl:2, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
+}
+
+function igalMoveConfirm(p, dir){
+    var checked = document.querySelector('#modal-igal-move-'+p+' input[name=parent]:checked');
+    var typed = document.getElementById('igal-mv-new-'+p).value.trim();
+    var dest = typed || (checked ? checked.value : '');
+    htmx.ajax('POST','/im/in',{values:{type:p+'_move', branch:p, lvl:2, dir:dir, name:dest, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
+    UI_closeModal('igal-move-'+p);
+}
+"""
+
     IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
     def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None):
@@ -1971,6 +2038,7 @@ class ImageGallery:
             self.IM.scripts[f"{p}_move"] = [self._intent_move]
             self.IM.scripts[f"{p}_meta"] = [self._intent_meta]
             self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
+            self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
 
     def _data_uri(self, rel: str) -> str:
         """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
@@ -1996,11 +2064,12 @@ class ImageGallery:
 
     def render_shell(self, rel_dir: str = "", include_css: bool = True) -> str:
         style_tag = f"<style>{self.CSS}</style>" if include_css else ""
-        return f"""{style_tag}<div class="igal-shell" id="igal-shell-{self.intent_prefix}">
+        return f"""{style_tag}<script>{self.SCRIPT}</script><div class="igal-shell" id="igal-shell-{self.intent_prefix}">
             {self._crumbs_html(rel_dir)}
-            <div class="igal-grid" id="igal-grid-{self.intent_prefix}">{self.grid_html(rel_dir)}</div>
+            <div class="igal-grid" id="igal-grid-{self.intent_prefix}" tabindex="0">{self.grid_html(rel_dir)}</div>
             <div id="igal-lightbox-slot-{self.intent_prefix}"></div>
-        </div>"""
+        </div>
+        <button class="cm-qbtn" style="position:absolute;top:.3rem;right:.3rem;z-index:5;color:#ff4444" onclick="igalDeleteChecked('{self.intent_prefix}')" title="Delete selected">&#x1F5D1;</button>"""
 
     # lightbox_html — close button now clears the slot (plain innerHTML swap), no DOM-removal JS, no dangling element to leak if the page is swapped elsewhere.
     def lightbox_html(self, rel_dir: str, index: int) -> str:
@@ -2083,7 +2152,11 @@ class ImageGallery:
         for part in parts:
             acc = f"{acc}/{part}".strip("/")
             crumbs.append(f"""<span style="opacity:.4">/</span><span class="igal-crumb" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": acc})}'>{_safe(part)}</span>""")
-        controls = f"""<div class="igal-controls"><button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_create_folder", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-prompt="New folder name:" title="New folder">&#x1F4C1;+</button><button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-include="#igal-grid-{p}" hx-vals='{json.dumps({"type": f"{p}_move", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-prompt="Move selected to folder (blank = root):" title="Move selected">&#x21C6;</button><button class="cm-qbtn" style="color:#ff4444" hx-post="/im/in" hx-target="body" hx-swap="none" hx-include="#igal-grid-{p}" hx-vals='{json.dumps({"type": f"{p}_delete", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-confirm="Delete selected items?" title="Delete selected">&#x1F5D1;</button></div>"""
+        controls = f"""<div class="igal-controls">
+                           <button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_create_folder", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-prompt="New folder name:" title="New folder">&#x1F4C1;+</button>
+                           <button class="cm-qbtn" onclick="htmx.ajax('POST','/im/in',{{values:{{type:'{p}_move_modal', branch:'{p}', lvl:{self.nesting_level}, dir:'{rel_dir}', delete_targets: JSON.stringify(igalCheckedTargets('{p}'))}}, swap:'none'}})" title="Move selected">&#x21C6;</button>
+                           <button class="cm-qbtn" style="color:#ff4444" hx-post="/im/in" hx-target="body" hx-swap="none" hx-include="#igal-grid-{p}" hx-vals='{json.dumps({"type": f"{p}_delete", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-confirm="Delete selected items?" title="Delete selected">&#x1F5D1;</button>
+                       </div>"""
         return f"""<div class="igal-crumbs" id="igal-crumbs-{p}">{"".join(crumbs)}<span id="igal-action-msg" style="font-size:.7rem;margin-left:.4rem"></span>{controls}</div>"""
 
     def grid_html(self, rel_dir: str) -> str:
@@ -2103,9 +2176,25 @@ class ImageGallery:
         if not cells: cells = """<div style="grid-column:1/-1;color:var(--text_muted);padding:1rem;font-size:.7rem">Empty folder.</div>"""
         return cells
 
+    def _move_modal_html(self, rel_dir: str, count: int) -> str:
+        p = self.intent_prefix
+        body = f"""<div style="font-size:.75rem;color:var(--text_muted);margin-bottom:.5rem">Move {count} item(s) to:</div>
+                   {self.fm.folder_picker_html()}
+                   <input type="text" id="igal-mv-new-{p}" placeholder="or type a new folder name" class="module-select" style="width:100%;font-size:.75rem;margin-top:.4rem">
+                   <button type="button" class="ui-btn" style="width:100%;margin-top:.6rem" onclick="igalMoveConfirm('{p}','{_safe(rel_dir)}')">Move</button>"""
+        return UI.modal(f"igal-move-{p}", "Move Items", body)
+
+    async def _im_move_modal(self, request, payload, imr):
+        rel_dir = payload.get("dir", "")
+        targets = _parse_targets(payload.get("delete_targets", []))
+        if not targets:
+            imr.oob('<span style="color:#ffaa44;font-size:.7rem">Select items first</span>', "igal-action-msg")
+            return imr
+        imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}">{self._move_modal_html(rel_dir, len(targets))}</div>')
+        return imr
+
     async def _intent_move(self, request, payload, imr):
-        targets = payload.get("delete_targets", [])
-        if isinstance(targets, str): targets = [targets]
+        targets = _parse_targets(payload.get("delete_targets", []))
         dest = (payload.get("name") or "").strip()
         rel_dir = payload.get("dir", "")
         self.fm.batch_move(targets, dest)

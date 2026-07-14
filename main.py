@@ -1,5 +1,5 @@
 # main.py
-import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading, pathlib, shutil
+import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading, pathlib, shutil, traceback
 from contextlib import contextmanager
 from urllib.parse import quote
 from fastapi import FastAPI, Request, Depends, HTTPException, Form, Response, WebSocket, status, Body
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from jose import jwt, JWTError
 
+from .encrypt import encrypt_token, decrypt_token
 from .auth import create_access_token, verify_password, get_current_user, hash_password
 from .database import engine, Base, get_db, SessionLocal
 from .models import *
@@ -94,20 +95,20 @@ sync_information_docs()
 async def inject_context(request: Request, call_next):
     """
     Runs before every request. Resolves the current user and sets request.state.user so state.py can access it without an extra DB hit.
-
     Theme and ui_data are server-wide constants - safe as Jinja globals.
     User is intentionally NOT set as a global (race condition: one request's user could overwrite another's in a shared template context).
     """
     global base_theme
     db = SessionLocal()
     try:
-        UI.reset_toolbar_layout()   # reset per-request toolbar index counters
-        active_theme = db.query(Theme).filter(Theme.is_active == True).first()
+        UI.reset_toolbar_layout() # reset per-request toolbar index counters
+        server_row = db.query(ServerState).first()
+        server_default = ((server_row.state or {}).get("_theme", {}).get("server_default", {}) if server_row and server_row.state else {})
+        base_theme = {**DEFAULT_THEMES.get("dark", {}), **server_default}
         ui_data = {s.key: s.value for s in db.query(UIString).all()}
         try: user = await get_current_user(request, db=db)
-        except Exception: user = None  # TEMP CHANGE - WIlL NOT ALLOW "PUBLIC ROUTES"  return RedirectResponse(url="/login")
-        if active_theme and active_theme.config != base_theme: base_theme = active_theme.config # Done so that the base_theme is where default is set and continues as a global variable
-        request.state.user = user   # per-request safe = for concurrent users
+        except Exception: user = None
+        request.state.user = user # per-request safe = for concurrent users
         templates.env.globals.update({"theme": base_theme, "ui": ui_data, "get_modules": get_module_list})
     finally:
         db.close()
@@ -141,22 +142,23 @@ def load_server_router(path, item, prefix, dependencies={}, router_type="module"
         spec = importlib.util.spec_from_file_location(f"{path_modifier}{dash}{item}", main_path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        has_router = hasattr(mod, "router")
         module_meta = {"label": item.replace("_", " ").title(), "icon": "", "description": "-", "persistence": "public", "public": False}
         module_meta.update(getattr(mod, "MODULE_META", None) or getattr(mod, "TOOL_META", {}))
-        auth_dep = [] if (path_modifier == "public" or module_meta.get("public")) else [Depends(get_current_user)]
-        app.include_router(mod.router, prefix=f"/{effective_prefix}/{item}", tags=[f"{item}:{router_type}"], dependencies=auth_dep)
-        if verbose: print(f"Loaded {router_type} router: {path_modifier}{dash}{item}")
+        if has_router:
+            auth_dep = [] if (path_modifier == "public" or module_meta.get("public")) else [Depends(get_current_user)]
+            app.include_router(mod.router, prefix=f"/{effective_prefix}/{item}", tags=[f"{item}:{router_type}"], dependencies=auth_dep)
+            if verbose: print(f"Loaded {router_type} router: {path_modifier}{dash}{item}")
+        elif verbose: print(f"Loaded {router_type} (import-only, no router): {path_modifier}{dash}{item}")
         if path_modifier != "public": metas[router_type].update({item: module_meta})
-#        metas[router_type].update({item: module_meta})
         refresh_cb = dependencies.get("refresh_system") if dependencies else None
         deps_with_meta = {**dependencies, "meta": module_meta}
-        if refresh_cb: deps_with_meta["refresh_system"] = refresh_cb(f"/{effective_prefix}/{item}", mod.router)
+        if refresh_cb and has_router: deps_with_meta["refresh_system"] = refresh_cb(f"/{effective_prefix}/{item}", mod.router)
         if dependencies and hasattr(mod, "init_module"):
             mod.init_module(deps_with_meta)
             if verbose: print(f"Environment injected into module: {item}")
         return True
     except Exception as e:
-        import traceback
         print(f"Error loading {path_modifier}{dash}{item} router: {e}")
         traceback.print_exc()
         return False
@@ -200,11 +202,13 @@ def load_modules(module_type="module"):
                                "ws":               manager,
                                "IMResponse":       IMResponse,
                                "push_to_client":   push_to_client,
+                               "encrypt_token":    encrypt_token,
+                               "decrypt_token":    decrypt_token,
                                "refresh_system":   create_refresh_callback}
 
         if module_type == "tool" and os.path.exists(f"{module_path}/{item}.py"):
             try:
-                spec = importlib.util.spec_from_file_location(item, module_path)
+                spec = importlib.util.spec_from_file_location(item, f"{module_path}/{item}.py")
                 Tools[item] = importlib.util.module_from_spec(spec)
                 sys.modules[item] = Tools[item]
                 spec.loader.exec_module(Tools[item])
@@ -311,10 +315,13 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.get("/external_frame", response_class=HTMLResponse)
 async def external_frame(url: str, request: Request, user=Depends(get_current_user)):
-    """Render an iframe for an internal service. Opened as a portal tab."""
-    safe_url = url if url.startswith("http://") or url.startswith("https://") else ""
-    if not safe_url: return HTMLResponse("Invalid URL", status_code=400)
-    return HTMLResponse(f"""<iframe src="{safe_url}" style="width:100%; height:100%; border:none; display:block;" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"></iframe>""")
+    safe_url = url if url.startswith(("http://","https://")) else f"http://{url}"
+    return HTMLResponse(f"""<div style="height:100%;display:flex;flex-direction:column">
+        <div style="padding:.2rem .5rem;font-size:.7rem;color:var(--text_muted);border-bottom:var(--border-thick) solid var(--border);display:flex;justify-content:space-between">
+            <span>{safe_url}</span><a href="{safe_url}" target="_blank" style="color:var(--accent)">Open in new tab &#x2192;</a>
+        </div>
+        <iframe src="{safe_url}" style="flex:1;width:100%;border:none;display:block;" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"></iframe>
+    </div>""")
 
 # -- WebSocket --
 

@@ -37,7 +37,6 @@ DEFAULT_THEMES = {
         "recall_button_size": "1.5rem",
         "recall_button_pos": "1rem",
         "bg_image": "",
-        "toolbar_rail_size": "0.4rem",
     },
     "light": {
         "name": "Japanese Zen",
@@ -60,7 +59,6 @@ DEFAULT_THEMES = {
         "recall_button_pos": "1rem",
         "bg_image": "none",
         "font_size": "1.2rem", # This can be bound to a settings slider later
-        "toolbar_rail_size": "0.4rem",
     }
 }
 

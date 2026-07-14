@@ -53,7 +53,6 @@ def control_panel_main(request: Request, user=Depends(get_current_user)):
     if not user: raise HTTPException(403)
     themes_options = "".join(f'<option value="{k}"{" selected" if user.custom_theme == v else ""}>{v["name"]}</option>' for k, v in DEFAULT_THEMES.items())
     nav_items = []
-    if user.role == "admin": nav_items += [("User Management", f"{_pre}/users"), ("Notifications", f"{_pre}/notifications"), ("Module Access", f"{_pre}/module-access"), ("Server Theme", f"{_pre}/theme/server-default")]
     nav_items += [("Identity", f"{_pre}/account"), ("Appearance", f"{_pre}/appearance")]
     if user.role == "admin": nav_items += [("User Management", f"{_pre}/users"), ("Notifications", f"{_pre}/notifications"), ("Module Access", f"{_pre}/module-access"), ("External Links", f"{_pre}/ext-links"), ("Server Theme", f"{_pre}/theme/server-default")]
     nav_html = "".join(f'<button type="button" hx-get="{url}" hx-target="#cp-content" hx-swap="innerHTML" class="nav-link" style="background:none; border:none; text-align:left; width:100%; padding:0.35rem 0.5rem; cursor:pointer;">{label}</button>' for label, url in nav_items)
@@ -507,3 +506,10 @@ async def cp_theme_module_user_save(module_ns: str, request: Request, config: di
 async def cp_theme_module_user_clear(module_ns: str, request: Request, user=Depends(get_current_user)):
     await clear_state(request, scope="user", namespace=f"_theme_{module_ns}", key="overrides")
     return {"status": "ok"}
+
+@router.post("/theme/switch", response_class=HTMLResponse)
+def cp_theme_switch(theme_mode: str = Form(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    if theme_mode not in DEFAULT_THEMES: return HTMLResponse("Unknown theme", status_code=400)
+    user.custom_theme = DEFAULT_THEMES[theme_mode]
+    db.commit()
+    return HTMLResponse("OK")
