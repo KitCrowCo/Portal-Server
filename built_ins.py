@@ -2226,3 +2226,110 @@ class ImageGallery:
         return imr
 
 def _safe(s: str) -> str: return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+class ShadowStore:
+    """
+    Generalized reversible-write layer over a FileManager. Any writer (an AI pipeline step, a human draft, an ingestion job) stages a change here instead of writing straight to disk.
+    A shadow entry holds the real file's content at staging time (base), the proposed new content, and a status.
+    Accept applies it - backing up whatever was overwritten first, so accept itself is reversible via history()/rollback().
+    Reject discards the proposal; the real file is never touched by staging alone.
+
+    auto_accept (settable per instance at runtime) is the on/off switch for "auto management":
+    same stage() call either way, the only difference is whether it queues for human review or applies immediately. Toggling this later doesn't change any caller's code.
+
+    Deliberately git-shaped (base/proposed/diff/accept/reject/rollback) so a git backend can replace this on-disk JSON staging store later without changing call sites
+    - the five methods below are the contract to preserve, not the storage format.
+    """
+    def __init__(self, fm: "FileManager", store_dir, auto_accept: bool = False):
+        self.fm = fm
+        self.dir = Path(store_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.auto_accept = auto_accept
+
+    def _key(self, rel_path: str) -> str: return hashlib.sha1(rel_path.encode()).hexdigest()[:20]
+    def _sp(self, rel_path: str) -> Path: return self.dir / f"{self._key(rel_path)}.json"
+
+    def stage(self, rel_path: str, new_content: str, author: str = "ai") -> dict:
+        try: base = self.fm.read(rel_path)
+        except Exception: base = ""  # new file - nothing to diff against yet
+        entry = {"path": rel_path, "base": base, "proposed": new_content, "author": author, "status": "pending", "staged": time.time()}
+        if self.auto_accept:
+            self._apply(entry)
+            entry["status"] = "accepted"
+        else:
+            self._sp(rel_path).write_text(json.dumps(entry, indent=2))
+        return entry
+
+    def pending(self) -> list:
+        out = []
+        for f in self.dir.glob("*.json"):
+            try:
+                e = json.loads(f.read_text())
+                if e.get("status") == "pending": out.append(e)
+            except Exception: continue
+        return sorted(out, key=lambda e: e.get("staged", 0), reverse=True)
+
+    def get(self, rel_path: str): p = self._sp(rel_path); return json.loads(p.read_text()) if p.exists() else None
+
+    def diff(self, rel_path: str) -> str:
+        """Diffs the staged proposal against the file's CURRENT real content, not the stale base - so the diff always reflects anything changed on disk since staging."""
+        e = self.get(rel_path)
+        if not e: return ""
+        try: current = self.fm.read(rel_path)
+        except Exception: current = ""
+        return "\n".join(difflib.unified_diff(current.splitlines(), e["proposed"].splitlines(), fromfile=f"current/{rel_path}", tofile=f"proposed/{rel_path}", lineterm=""))
+
+    def _apply(self, entry: dict):
+        rel_path = entry["path"]
+        try:
+            existing = self.fm.read(rel_path)
+            backup_dir = self.dir / "_history" / self._key(rel_path)
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            (backup_dir / f"{int(time.time())}.txt").write_text(existing)
+        except Exception: pass  # nothing on disk yet - no backup needed
+        self.fm.write(rel_path, entry["proposed"])
+
+    def accept(self, rel_path: str) -> bool:
+        e = self.get(rel_path)
+        if not e or e["status"] != "pending": return False
+        self._apply(e)
+        self._sp(rel_path).unlink(missing_ok=True)
+        return True
+
+    def reject(self, rel_path: str) -> bool:
+        p = self._sp(rel_path)
+        if not p.exists(): return False
+        p.unlink()
+        return True
+
+    def history(self, rel_path: str) -> list:
+        """Timestamps of prior accepted versions, most recent first."""
+        d = self.dir / "_history" / self._key(rel_path)
+        return sorted((int(f.stem) for f in d.glob("*.txt")), reverse=True) if d.exists() else []
+
+    def rollback(self, rel_path: str, ts: int) -> bool:
+        """Restores a prior accepted version - itself staged through _apply so it also creates a fresh backup point, i.e. rollback is never a dead end."""
+        f = self.dir / "_history" / self._key(rel_path) / f"{ts}.txt"
+        if not f.exists(): return False
+        self._apply({"path": rel_path, "proposed": f.read_text()})
+        return True
+
+def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str) -> str:
+    """Generic pending-review fragment. *_url are format strings taking {path} - caller owns
+    the actual routes; this only builds the list + per-item diff/accept/reject controls."""
+    pend = shadow.pending()
+    if not pend: return '<div style="color:var(--text_muted);font-size:.8rem;padding:.5rem">No pending changes.</div>'
+    rows = ""
+    for e in pend:
+        rp, did = e["path"], f"shadow-diff-{abs(hash(e['path']))%99999}"
+        rows += f"""<div class="glass" style="padding:.5rem .7rem;margin-bottom:.3rem">
+            <div style="display:flex;align-items:center;gap:.4rem">
+                <span style="flex:1;font-family:var(--font-mono);font-size:.78rem">{rp}</span>
+                <span style="font-size:.65rem;color:var(--text_muted)">{e.get("author","")}</span>
+                <button class="cm-qbtn" hx-get="{diff_url.format(path=rp)}" hx-target="#{did}" hx-swap="innerHTML">Diff</button>
+                <button class="cm-qbtn" style="color:var(--accent)" hx-post="{accept_url.format(path=rp)}" hx-target="#shadow-review-list" hx-swap="innerHTML">Accept</button>
+                <button class="cm-qbtn" style="color:#ff5f5f" hx-post="{reject_url.format(path=rp)}" hx-target="#shadow-review-list" hx-swap="innerHTML">Reject</button>
+            </div>
+            <div id="{did}" style="font-size:.68rem;font-family:var(--font-mono);white-space:pre-wrap;margin-top:.3rem"></div>
+        </div>"""
+    return rows

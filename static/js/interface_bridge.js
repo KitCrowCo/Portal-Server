@@ -302,6 +302,7 @@ const IB = (() => {
             }
             case 'clipboard_sync': { _cbValue = d.value ?? null; break; }
             case 'cfg': { Object.assign(_cfg, d.values || {}); _vpSetActive(_cfg.pointer); break; }
+
             case 'pipeline_event': { document.dispatchEvent(new CustomEvent('pipeline:' + d.event, { detail: { job_id: d.job_id, ...d.payload } })); break; }
             case 'pipeline_stream': { document.dispatchEvent(new CustomEvent('pipeline:stream', { detail: { job_id: d.job_id, key: d.key, delta: d.delta } })); break; }
         }
