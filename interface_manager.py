@@ -339,7 +339,7 @@ async def handle_intent_route(request: Request) -> HTMLResponse:
         if "application/json" in ct:
             body = await request.json()
         else:
-            form = await request.form()
+            form = await request.form(max_part_size=32 * 1024 * 1024)  # was: await request.form() - default 1MiB/field cap was truncating large document autosaves
             body = {}
             for key in form.keys():
                 vals = form.getlist(key)

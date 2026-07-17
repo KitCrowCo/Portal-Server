@@ -2314,9 +2314,8 @@ class ShadowStore:
         self._apply({"path": rel_path, "proposed": f.read_text()})
         return True
 
-def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str) -> str:
-    """Generic pending-review fragment. *_url are format strings taking {path} - caller owns
-    the actual routes; this only builds the list + per-item diff/accept/reject controls."""
+def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str, list_id: str = "shadow-review-list") -> str:
+    """Generic pending-review fragment. *_url are format strings taking {path} - caller owns the actual routes; this only builds the list + per-item diff/accept/reject controls."""
     pend = shadow.pending()
     if not pend: return '<div style="color:var(--text_muted);font-size:.8rem;padding:.5rem">No pending changes.</div>'
     rows = ""
@@ -2327,9 +2326,63 @@ def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, 
                 <span style="flex:1;font-family:var(--font-mono);font-size:.78rem">{rp}</span>
                 <span style="font-size:.65rem;color:var(--text_muted)">{e.get("author","")}</span>
                 <button class="cm-qbtn" hx-get="{diff_url.format(path=rp)}" hx-target="#{did}" hx-swap="innerHTML">Diff</button>
-                <button class="cm-qbtn" style="color:var(--accent)" hx-post="{accept_url.format(path=rp)}" hx-target="#shadow-review-list" hx-swap="innerHTML">Accept</button>
-                <button class="cm-qbtn" style="color:#ff5f5f" hx-post="{reject_url.format(path=rp)}" hx-target="#shadow-review-list" hx-swap="innerHTML">Reject</button>
+                <button class="cm-qbtn" style="color:var(--accent)" hx-post="{accept_url.format(path=rp)}" hx-target="#{list_id}" hx-swap="innerHTML">Accept</button>
+                <button class="cm-qbtn" style="color:#ff5f5f" hx-post="{reject_url.format(path=rp)}" hx-target="#{list_id}" hx-swap="innerHTML">Reject</button>
             </div>
             <div id="{did}" style="font-size:.68rem;font-family:var(--font-mono);white-space:pre-wrap;margin-top:.3rem"></div>
         </div>"""
     return rows
+
+class PromptBlockLibrary:
+    """Generalized reusable text-block library ("mix and match" prompt fragments) - not tied to any one save slot.
+    Blocks are named, taggable snippets in flat JSON; any textarea-driven UI lists/inserts them via these three methods.
+    Storage is per json_path so callers pick scope (server-wide, per-user, per-project) just by choosing a different path."""
+    def __init__(self, json_path):
+        self.path = Path(json_path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def list(self, tag: str = None) -> list:
+        blocks = json.loads(self.path.read_text()) if self.path.exists() else []
+        return [b for b in blocks if not tag or tag in b.get("tags", [])]
+
+    def get(self, block_id: str): return next((b for b in self.list() if b["id"] == block_id), None)
+
+    def save(self, name: str, text: str, tags: list = None, block_id: str = None) -> dict:
+        blocks = self.list()
+        if block_id and (b := next((b for b in blocks if b["id"] == block_id), None)): b.update(name=name, text=text, tags=tags or [])
+        else:
+            block_id = block_id or f"blk_{uuid.uuid4().hex[:8]}"
+            blocks.append({"id": block_id, "name": name, "text": text, "tags": tags or []})
+        self.path.write_text(json.dumps(blocks, indent=2))
+        return self.get(block_id)
+
+    def delete(self, block_id: str): self.path.write_text(json.dumps([b for b in self.list() if b["id"] != block_id], indent=2))
+
+def prompt_block_picker_html(library: "PromptBlockLibrary", textarea_id: str, save_url: str) -> str:
+    """Dropdown + insert/save controls targeting a specific textarea by id.
+    Insert APPENDS to the field's current value (mix-and-match composition), not replace - multiple blocks layer into one field across repeated inserts."""
+    blocks = library.list()
+    opts = "".join(f'<option value="{b["id"]}" data-text="{UI.escape(b["text"])}">{UI.escape(b["name"])}</option>' for b in blocks) or '<option value="">(no blocks saved)</option>'
+    return f"""<div class="pb-picker" data-save-url="{save_url}" style="display:flex;gap:.3rem;align-items:center;margin:.2rem 0">
+        <select class="pb-select module-select" style="font-size:.68rem;flex:1" data-target="{textarea_id}">{opts}</select>
+        <button type="button" class="cm-qbtn" onclick="pbInsert(this)">&#x2193; Insert</button>
+        <button type="button" class="cm-qbtn" onclick="pbSaveAs(this)">&#x1F4BE; Save as block</button>
+    </div>"""
+
+PROMPT_BLOCK_JS = """
+function pbInsert(btn){
+    var wrap = btn.closest('.pb-picker'); var sel = wrap.querySelector('.pb-select');
+    var opt = sel.selectedOptions[0]; var ta = document.getElementById(sel.dataset.target);
+    if(!ta || !opt || !opt.dataset.text) return;
+    ta.value = (ta.value ? ta.value + '\\n\\n' : '') + opt.dataset.text;
+    ta.dispatchEvent(new Event('input',{bubbles:true}));
+}
+async function pbSaveAs(btn){
+    var wrap = btn.closest('.pb-picker'); var sel = wrap.querySelector('.pb-select');
+    var ta = document.getElementById(sel.dataset.target);
+    var name = prompt('Save current text as block named:'); if(!name) return;
+    var fd = new FormData(); fd.append('name', name); fd.append('text', ta.value); fd.append('target', ta.id);
+    var r = await fetch(wrap.dataset.saveUrl, {method:'POST', body:fd});
+    wrap.outerHTML = await r.text();
+}
+"""
