@@ -139,10 +139,18 @@ def load_server_router(path, item, prefix, dependencies={}, router_type="module"
     if router_type == "module": os.makedirs(f"./data/{item}", exist_ok = True)
     effective_prefix = "public" if path_modifier == "public" else prefix
     try:
-        spec = importlib.util.spec_from_file_location(f"{path_modifier}{dash}{item}", main_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        # Prevent dual-instantiation: reuse the module if the Tool loader just created it
+        if router_type == "tool" and not path_modifier and item in Tools:
+            mod = Tools[item]
+        else:
+            spec = importlib.util.spec_from_file_location(f"{path_modifier}{dash}{item}", main_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
         has_router = hasattr(mod, "router")
+        # spec = importlib.util.spec_from_file_location(f"{path_modifier}{dash}{item}", main_path)
+        # mod = importlib.util.module_from_spec(spec)
+        # spec.loader.exec_module(mod)
+        # has_router = hasattr(mod, "router")
         module_meta = {"label": item.replace("_", " ").title(), "icon": "", "description": "-", "persistence": "public", "public": False}
         module_meta.update(getattr(mod, "MODULE_META", None) or getattr(mod, "TOOL_META", {}))
         if has_router:

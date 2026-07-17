@@ -1300,7 +1300,7 @@ class PortalEditor:
         s = doc.get("settings", {})
         s.update(settings)
         def _to_bool(v): return v.lower() in ("true", "1", "on") if isinstance(v, str) else bool(v)
-        return {"view": str(s.get("view","edit")), "font": str(s.get("font","mono")), "wrap": _to_bool(s.get("wrap", True)), "zoom": max(0.6, min(float(s.get("zoom", 1.0)), 2.0)), "border": _to_bool(s.get("border", False)), "interactive": _to_bool(s.get("interactive", False))}
+        return {"view": str(s.get("view","edit")), "font": str(s.get("font", "Bitter")), "wrap": _to_bool(s.get("wrap", True)), "zoom": max(0.6, min(float(s.get("zoom", 1.0)), 2.0)), "border": _to_bool(s.get("border", False)), "interactive": _to_bool(s.get("interactive", True)) }
 
     def _get_action_url(self, action_name: str, did: str) -> tuple[str, str]:
         if self.IM: return "/im/in", f"""hx-vals='{{"type":"{self.intent_prefix}_{action_name}", "branch":"{did}", "lvl":{self.nesting_level}}}'"""
