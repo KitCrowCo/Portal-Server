@@ -1439,10 +1439,8 @@ class PortalEditor:
         textarea = f"""<textarea id="doc-textarea-{did}" name="content" class="doc-textarea {wrap_class}" style="{font_size}" oninput="{dirty_js}" onkeydown="peKeydown(event,'{did}')" hx-post="{url_save}" {vals_save} hx-trigger="keyup changed delay:{self.autosave_delay}, blursave" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-include="this" hx-on::after-request="{clean_js}">{content_val}</textarea><span id="editor-autosave-{did}" style="display:none"></span>"""
         rendered_preview = self.render_preview(doc.get("content",""), zoom = zoom, task_interactive = settings.get("interactive", False), doc_id=did, path=doc.get("path",""), **self.render_kwargs_fn())
         if self.IM:
-            # IM-bound editors get live preview updates as an OOB push from the save handler (below) - no standalone trigger needed, which also removes a redundant second network round-trip per keystroke.
             preview = f"""<div id="editor-preview-{did}" class="editor-scroll-area font-{font}">{rendered_preview}</div>"""
         else:
-            # REST-mode editors (no IM) still need their own trigger - requires a /doc/preview/{id} route on the host module's router; if that route doesn't exist, this will 404 silently per keystroke.
             url_prev, vals_prev = self._get_action_url("preview", did)
             preview = f"""<div id="editor-preview-{did}" class="editor-scroll-area font-{font}" hx-post="{url_prev}" {vals_prev} hx-trigger="keyup changed delay:{self.autosave_delay} from:#doc-textarea-{did}" hx-target="this" hx-swap="innerHTML" hx-include="#doc-textarea-{did}">{rendered_preview}</div>"""
         if view == "preview": return f'<div class="editor-main-container">{preview}</div>'
@@ -1604,6 +1602,7 @@ class SettingField:
         self.hx_get = hx_get
         self.hx_target = hx_target
         self.step = step if step is not None else ("any" if isinstance(default, float) else 1)
+        
     def get_options(self, values=None):
         if callable(self.options):
             try: return self.options(values)
@@ -1660,7 +1659,7 @@ class SettingsGroup:
                     opts += f'<option value="{html.escape(str(opt_val))}" {selected}>{html.escape(str(opt_lbl))}</option>'
                 out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<select name="{f.name}"{hx_attr} class="module-select" style="width:100%">{opts}</select></label>'
             elif f.type == "number":
-                out += f'<input type="number" step="{f.step}" name="{f.key}" value="{v}" class="module-select">'
+                out += f'<input type="number" step="{f.step}" name="{f.name}" value="{val}" class="module-select">'
             elif f.type == "checkbox":
                 checked = "checked" if val else ""
                 out += f'<label style="display:block; margin-bottom:1rem;"><input type="checkbox" name="{f.name}" value="1" {checked}{hx_attr}> {html.escape(f.label)}{hint}</label>'
