@@ -136,32 +136,36 @@ def load_server_router(path, item, prefix, dependencies={}, router_type="module"
     dash = "_" if path_modifier else ""
     main_path = f"{path}/{path_modifier}{dash}{item}.py"
     if not os.path.exists(main_path): return False
-    if router_type == "module": os.makedirs(f"./data/{item}", exist_ok = True)
+    if router_type == "module": os.makedirs(f"./data/{item}", exist_ok=True)
     effective_prefix = "public" if path_modifier == "public" else prefix
     try:
         # Prevent dual-instantiation: reuse the module if the Tool loader just created it
-        if router_type == "tool" and not path_modifier and item in Tools:
+        if router_type == "tool" and not path_modifier:
             mod = Tools[item]
         else:
-            spec = importlib.util.spec_from_file_location(f"{path_modifier}{dash}{item}", main_path)
+            # Use an explicit package hierarchy name (e.g., modules.my_module.my_module)
+            module_name = f"{router_type}s.{item}.{path_modifier}{dash}{item}".strip('.')
+            spec = importlib.util.spec_from_file_location(module_name, main_path)
             mod = importlib.util.module_from_spec(spec)
+            # Define the package so relative imports work inside the tool natively
+            mod.__package__ = f"{router_type}s.{item}"
+            # Register in sys.modules BEFORE execution to prevent dual instantiation
+            sys.modules[module_name] = mod
             spec.loader.exec_module(mod)
         has_router = hasattr(mod, "router")
-        # spec = importlib.util.spec_from_file_location(f"{path_modifier}{dash}{item}", main_path)
-        # mod = importlib.util.module_from_spec(spec)
-        # spec.loader.exec_module(mod)
-        # has_router = hasattr(mod, "router")
         module_meta = {"label": item.replace("_", " ").title(), "icon": "", "description": "-", "persistence": "public", "public": False}
         module_meta.update(getattr(mod, "MODULE_META", None) or getattr(mod, "TOOL_META", {}))
         if has_router:
             auth_dep = [] if (path_modifier == "public" or module_meta.get("public")) else [Depends(get_current_user)]
             app.include_router(mod.router, prefix=f"/{effective_prefix}/{item}", tags=[f"{item}:{router_type}"], dependencies=auth_dep)
             if verbose: print(f"Loaded {router_type} router: {path_modifier}{dash}{item}")
-        elif verbose: print(f"Loaded {router_type} (import-only, no router): {path_modifier}{dash}{item}")
+        elif verbose:
+            print(f"Loaded {router_type} (import-only, no router): {path_modifier}{dash}{item}")
         if path_modifier != "public": metas[router_type].update({item: module_meta})
         refresh_cb = dependencies.get("refresh_system") if dependencies else None
         deps_with_meta = {**dependencies, "meta": module_meta}
-        if refresh_cb and has_router: deps_with_meta["refresh_system"] = refresh_cb(f"/{effective_prefix}/{item}", mod.router)
+        if refresh_cb and has_router:
+            deps_with_meta["refresh_system"] = refresh_cb(f"/{effective_prefix}/{item}", mod.router)
         if dependencies and hasattr(mod, "init_module"):
             mod.init_module(deps_with_meta)
             if verbose: print(f"Environment injected into module: {item}")
@@ -177,21 +181,27 @@ def load_modules(module_type="module"):
     active_theme = db.query(Theme).filter(Theme.is_active == True).first()
     ui_data = {s.key: s.value for s in db.query(UIString).all()}
     db.close()
-
+    # GUARANTEE BASE __init__.py EXISTS (e.g., tools/__init__.py) This makes the root folder a valid package for absolute imports.
+    base_init_path = os.path.join(modules_dir, "__init__.py")
+    if os.path.exists(modules_dir) and not os.path.exists(base_init_path):
+        with open(base_init_path, "w") as f: pass
     def create_refresh_callback(target_prefix, target_router):
         """Creates a scoped callback for a specific level-2 router."""
         def register_sub_routes():
-            app.routes[:] = [r for r in app.routes if not (hasattr(r, "path") and r.path.startswith(target_prefix))] # Clear ONLY routes belonging to this specific level-2 module
+            app.routes[:] = [r for r in app.routes if not (hasattr(r, "path") and r.path.startswith(target_prefix))]
             app.include_router(target_router, prefix=target_prefix)
-            app.openapi_schema = None # Clear OpenAPI cache so the new routes show up in docs
-            if VERBOSE: print(f"--- Refreshed Sub-Routes for: {target_prefix} {[r for r in app.routes if (hasattr(r, 'path') and r.path.startswith(target_prefix))]}---")
+            app.openapi_schema = None
+            if VERBOSE: print(f"--- Refreshed Sub-Routes for: {target_prefix} ---")
         return register_sub_routes
-
     for item in os.listdir(modules_dir):
         module_path = os.path.join(modules_dir, item)
         if not os.path.isdir(module_path) or not validate_module_name(item): continue
-        check_module_dependencies(module_path)
+        # GUARANTEE ITEM __init__.py EXISTS (e.g., tools/my_tool/__init__.py) This makes the specific tool/module a valid sub-package.
+        item_init_path = os.path.join(module_path, "__init__.py")
+        if not os.path.exists(item_init_path):
+            with open(item_init_path, "w") as f: pass
 
+        check_module_dependencies(module_path)
         router_dependencies = {"auth":             get_current_user,
                                "db":               get_db,
                                "templates":        templates,
@@ -213,24 +223,26 @@ def load_modules(module_type="module"):
                                "encrypt_token":    encrypt_token,
                                "decrypt_token":    decrypt_token,
                                "refresh_system":   create_refresh_callback}
-
         if module_type == "tool" and os.path.exists(f"{module_path}/{item}.py"):
             try:
-                spec = importlib.util.spec_from_file_location(item, f"{module_path}/{item}.py")
-                Tools[item] = importlib.util.module_from_spec(spec)
-                sys.modules[item] = Tools[item]
-                spec.loader.exec_module(Tools[item])
+                module_name = f"tools.{item}.{item}"
+                spec = importlib.util.spec_from_file_location(module_name, f"{module_path}/{item}.py")
+                mod = importlib.util.module_from_spec(spec)
+                mod.__package__ = f"tools.{item}"
+                sys.modules[module_name] = mod
+                spec.loader.exec_module(mod)
+                Tools[item] = mod
                 if VERBOSE: print(f"Loaded Internal Tool: {item}")
-            except Exception:
-                pass
-
-        admin_router = load_server_router(module_path, item, prefix = module_type, dependencies = router_dependencies, router_type = module_type, path_modifier = "", verbose = VERBOSE)
+            except Exception as e:
+                print(f"--- ERROR Loading Internal Tool: {item} ---")
+                traceback.print_exc()
+        admin_router = load_server_router(module_path, item, prefix=module_type, dependencies=router_dependencies, router_type=module_type, path_modifier="", verbose=VERBOSE)
         if admin_router:
             if os.path.exists(f"{module_path}/static"):
-                os.makedirs(f"./data/{item}/static", exist_ok = True)
-                app.mount(f"/{module_type}/assets/{item}", StaticFiles(directory=f"./data/{item}/static"),  name=f"{module_type}_assets_{item}")
-            if os.path.exists(f"{module_path}/public_{item}"):
-                if VERBOSE: print(F"Mounting Public Router:{item}")
+                os.makedirs(f"./data/{item}/static", exist_ok=True)
+                app.mount(f"/{module_type}/assets/{item}", StaticFiles(directory=f"./data/{item}/static"), name=f"{module_type}_assets_{item}")
+            if os.path.exists(f"{module_path}/public_{item}.py"):
+                if VERBOSE: print(f"Mounting Public Router: {item}")
                 public_deps = {"templates": templates, "theme": active_theme.config if active_theme else {}, "tools": Tools, "resolve_theme": resolve_theme_full, "get_state": get_state}
                 load_server_router(module_path, item, prefix=module_type, dependencies=public_deps, router_type=module_type, path_modifier="public", verbose=VERBOSE)
 

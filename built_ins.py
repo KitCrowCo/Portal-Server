@@ -737,6 +737,7 @@ class TabManager:
             self.IM.scripts[f"{p}_focus_tab"] = [self._focus]
             self.IM.scripts[f"{p}_close_tab"] = [self._close]
             self.IM.scripts[f"{p}_reorder"]   = [self._reorder]
+            self.IM.scripts[f"{p}_back"]      = [self._back]
 
     async def safe_render_content(self, request, state: dict) -> tuple[dict, str]:
         """ Lower-level wrapper around the passed render_content_fn. Intercepts all routing drops, key errors, and backend failures cleanly. """
@@ -866,6 +867,21 @@ class TabManager:
         bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable)
         imr.oob(bar_html, self.tab_bar_id, swap="outerHTML")
         return imr
+    
+    def push_history(self, tab: dict, old_path: str):
+        """Call before overwriting tab['path'] in any same-tab navigation to enable _back."""
+        if old_path:
+            hist = tab.setdefault("history", [])
+            hist.append(old_path)
+            tab["history"] = hist[-50:]
+
+    async def _back(self, request, payload, imr):
+        state = await self._load(request)
+        state = self.next_active(state)
+        tab = state["tabs"].get(payload.get("id") or state.get("active"))
+        if not tab or not tab.get("history"): return imr
+        tab["path"] = tab["history"].pop()
+        return await self._push(request, state, imr)
 
 # --- Chat Manager ---
 # Reusable chat UI - bubble/list/compact/log view styles, HTMX-native, stream-aware.
@@ -1577,7 +1593,7 @@ class PortalEditor:
 # --- Settings Manager (Strictly Agnostic) ---
 
 class SettingField:
-    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_get=None, hx_target=None):
+    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_get=None, hx_target=None, step =None):
         self.name = name
         self.label = label
         self.type = type
@@ -1587,7 +1603,7 @@ class SettingField:
         # Agnostic HTMX properties delegated to the calling module
         self.hx_get = hx_get
         self.hx_target = hx_target
-
+        self.step = step if step is not None else ("any" if isinstance(default, float) else 1)
     def get_options(self, values=None):
         if callable(self.options):
             try: return self.options(values)
@@ -1618,7 +1634,7 @@ class SettingsGroup:
             if f.type == "checkbox":
                 data[f.name] = bool(raw)
             elif f.type == "number":
-                try: data[f.name] = int(raw) if raw else 0
+                try: data[f.name] = float(raw) if raw else 0
                 except: data[f.name] = f.default
             elif f.type == "json":
                 # Safely parse JSON textareas back into dicts
@@ -1643,6 +1659,8 @@ class SettingsGroup:
                     selected = "selected" if str(val) == str(opt_val) else ""
                     opts += f'<option value="{html.escape(str(opt_val))}" {selected}>{html.escape(str(opt_lbl))}</option>'
                 out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<select name="{f.name}"{hx_attr} class="module-select" style="width:100%">{opts}</select></label>'
+            elif f.type == "number":
+                out += f'<input type="number" step="{f.step}" name="{f.key}" value="{v}" class="module-select">'
             elif f.type == "checkbox":
                 checked = "checked" if val else ""
                 out += f'<label style="display:block; margin-bottom:1rem;"><input type="checkbox" name="{f.name}" value="1" {checked}{hx_attr}> {html.escape(f.label)}{hint}</label>'
@@ -1667,8 +1685,8 @@ class SettingsPanel:
     def get_group(self, name): return next((g for g in self.groups if g.name == name), None)
 
     def page_shell(self, body_html: str, close_url: str = "", target_id: str = "", title: str = None) -> str:
-        close_btn = f'<button type="button" class="close-btn" style="position:absolute;top:1.2rem;right:1.2rem" hx-get="{close_url}" hx-target="#{target_id}" hx-swap="innerHTML">&#x2715;</button>' if (close_url and target_id) else ""
-        return f'<div style="padding:1.5rem;max-width:40rem;position:relative;height:100%;overflow-y:auto;box-sizing:border-box">{close_btn}<h2 style="margin:0 0 1rem;font-size:1rem">{UI.escape(title or self.title)}</h2>{body_html}</div>'
+        close_btn = f'<button type="button" class="close-btn" style="position:absolute;top:1.2rem; right:1.2rem" hx-get="{close_url}" hx-target="#{target_id}" hx-swap="innerHTML">&#x2715;</button>' if (close_url and target_id) else ""
+        return f'<div style="padding:1.5rem;max-width:40rem;position:relative;height:100%;overflow-y:auto;box-sizing:border-box">{close_btn}<h2 style="margin:0 0 1rem; font-size:1rem">{UI.escape(title or self.title)}</h2>{body_html}</div>'
 
 # --- File Manager ---
 # General-purpose, root-isolated file I/O. Optional IM/TM injection wires standard open/save intents for any module that wants file-backed tabs without reimplementing this.
@@ -2229,35 +2247,30 @@ def _safe(s: str) -> str: return str(s).replace("&", "&amp;").replace("<", "&lt;
 
 class ShadowStore:
     """
-    Generalized reversible-write layer over a FileManager. Any writer (an AI pipeline step, a human draft, an ingestion job) stages a change here instead of writing straight to disk.
-    A shadow entry holds the real file's content at staging time (base), the proposed new content, and a status.
-    Accept applies it - backing up whatever was overwritten first, so accept itself is reversible via history()/rollback().
-    Reject discards the proposal; the real file is never touched by staging alone.
-
-    auto_accept (settable per instance at runtime) is the on/off switch for "auto management":
-    same stage() call either way, the only difference is whether it queues for human review or applies immediately. Toggling this later doesn't change any caller's code.
-
-    Deliberately git-shaped (base/proposed/diff/accept/reject/rollback) so a git backend can replace this on-disk JSON staging store later without changing call sites
-    - the five methods below are the contract to preserve, not the storage format.
+    Reversible-write layer over a FileManager. Every AI-produced write - text or binary - stages here first; nothing reaches the real file tree without accept() (or auto_accept, an explicit per-store opt-in, never a default). 
+    This is the "stakes" boundary: the person who owns the data's value stays in the loop for every change, proportional to nothing - it's the same gate whether the change is trivial or precious, because the AI cannot know which is which.
+    Binary entries skip diffing (nothing meaningful to diff) but go through the identical stage/accept/reject/rollback lifecycle as text.
     """
-    def __init__(self, fm: "FileManager", store_dir, auto_accept: bool = False):
+    def __init__(self, fm, store_dir, **kwargs):
         self.fm = fm
         self.dir = Path(store_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.auto_accept = auto_accept
-
-    def _key(self, rel_path: str) -> str: return hashlib.sha1(rel_path.encode()).hexdigest()[:20]
-    def _sp(self, rel_path: str) -> Path: return self.dir / f"{self._key(rel_path)}.json"
+        
+    def _key(self, rel_path): return hashlib.sha1(rel_path.encode()).hexdigest()[:20]
+    def _sp(self, rel_path): return self.dir / f"{self._key(rel_path)}.json"
+    def _bp(self, rel_path): return self.dir / f"{self._key(rel_path)}.bin"
 
     def stage(self, rel_path: str, new_content: str, author: str = "ai") -> dict:
         try: base = self.fm.read(rel_path)
-        except Exception: base = ""  # new file - nothing to diff against yet
-        entry = {"path": rel_path, "base": base, "proposed": new_content, "author": author, "status": "pending", "staged": time.time()}
-        if self.auto_accept:
-            self._apply(entry)
-            entry["status"] = "accepted"
-        else:
-            self._sp(rel_path).write_text(json.dumps(entry, indent=2))
+        except Exception: base = ""
+        entry = {"path": rel_path, "kind": "text", "base": base, "proposed": new_content, "author": author, "status": "pending", "staged": time.time()}
+        self._sp(rel_path).write_text(json.dumps(entry, indent=2))
+        return entry
+
+    def stage_binary(self, rel_path: str, data: bytes, author: str = "ai") -> dict:
+        entry = {"path": rel_path, "kind": "binary", "author": author, "status": "pending", "staged": time.time(), "size": len(data)}
+        self._bp(rel_path).write_bytes(data)
+        self._sp(rel_path).write_text(json.dumps(entry, indent=2))
         return entry
 
     def pending(self) -> list:
@@ -2272,60 +2285,70 @@ class ShadowStore:
     def get(self, rel_path: str): p = self._sp(rel_path); return json.loads(p.read_text()) if p.exists() else None
 
     def diff(self, rel_path: str) -> str:
-        """Diffs the staged proposal against the file's CURRENT real content, not the stale base - so the diff always reflects anything changed on disk since staging."""
         e = self.get(rel_path)
-        if not e: return ""
+        if not e or e.get("kind") == "binary": return ""
         try: current = self.fm.read(rel_path)
         except Exception: current = ""
         return "\n".join(difflib.unified_diff(current.splitlines(), e["proposed"].splitlines(), fromfile=f"current/{rel_path}", tofile=f"proposed/{rel_path}", lineterm=""))
 
-    def _apply(self, entry: dict):
-        rel_path = entry["path"]
+    def _backup(self, rel_path: str, read_bytes: bool):
         try:
-            existing = self.fm.read(rel_path)
+            p = self.fm.resolve(rel_path)
+            if not p.exists(): return
             backup_dir = self.dir / "_history" / self._key(rel_path)
             backup_dir.mkdir(parents=True, exist_ok=True)
-            (backup_dir / f"{int(time.time())}.txt").write_text(existing)
-        except Exception: pass  # nothing on disk yet - no backup needed
-        self.fm.write(rel_path, entry["proposed"])
+            ts = int(time.time())
+            (backup_dir / f"{ts}{p.suffix}").write_bytes(p.read_bytes()) if read_bytes else (backup_dir / f"{ts}.txt").write_text(p.read_text())
+        except Exception: pass
+
+    def _apply_text(self, entry: dict):
+        self._backup(entry["path"], read_bytes=False)
+        self.fm.write(entry["path"], entry["proposed"])
+
+    def _apply_binary(self, rel_path: str):
+        self._backup(rel_path, read_bytes=True)
+        self.fm.write_bytes(rel_path, self._bp(rel_path).read_bytes())
 
     def accept(self, rel_path: str) -> bool:
         e = self.get(rel_path)
         if not e or e["status"] != "pending": return False
-        self._apply(e)
+        self._apply_binary(rel_path) if e.get("kind") == "binary" else self._apply_text(e)
         self._sp(rel_path).unlink(missing_ok=True)
+        self._bp(rel_path).unlink(missing_ok=True)
         return True
 
     def reject(self, rel_path: str) -> bool:
-        p = self._sp(rel_path)
-        if not p.exists(): return False
-        p.unlink()
-        return True
+        found = self._sp(rel_path).exists()
+        self._sp(rel_path).unlink(missing_ok=True)
+        self._bp(rel_path).unlink(missing_ok=True)
+        return found
 
     def history(self, rel_path: str) -> list:
-        """Timestamps of prior accepted versions, most recent first."""
         d = self.dir / "_history" / self._key(rel_path)
-        return sorted((int(f.stem) for f in d.glob("*.txt")), reverse=True) if d.exists() else []
+        return sorted((f.name for f in d.glob("*")), reverse=True) if d.exists() else []
 
-    def rollback(self, rel_path: str, ts: int) -> bool:
-        """Restores a prior accepted version - itself staged through _apply so it also creates a fresh backup point, i.e. rollback is never a dead end."""
-        f = self.dir / "_history" / self._key(rel_path) / f"{ts}.txt"
+    def rollback(self, rel_path: str, filename: str) -> bool:
+        f = self.dir / "_history" / self._key(rel_path) / filename
         if not f.exists(): return False
-        self._apply({"path": rel_path, "proposed": f.read_text()})
+        if f.suffix == ".txt": self._apply_text({"path": rel_path, "proposed": f.read_text()})
+        else: self._bp(rel_path).write_bytes(f.read_bytes()); self._apply_binary(rel_path); self._bp(rel_path).unlink(missing_ok=True)
         return True
-
-def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str, list_id: str = "shadow-review-list") -> str:
-    """Generic pending-review fragment. *_url are format strings taking {path} - caller owns the actual routes; this only builds the list + per-item diff/accept/reject controls."""
+    
+def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str, preview_url: str = "", list_id: str = "shadow-review-list") -> str:
     pend = shadow.pending()
     if not pend: return '<div style="color:var(--text_muted);font-size:.8rem;padding:.5rem">No pending changes.</div>'
     rows = ""
     for e in pend:
-        rp, did = e["path"], f"shadow-diff-{abs(hash(e['path']))%99999}"
+        rp = e["path"]; did = f"shadow-diff-{abs(hash(rp))%99999}"
+        if e.get("kind") == "binary":
+            body = f'<button class="cm-qbtn" hx-get="{preview_url.format(path=rp)}" hx-target="#{did}" hx-swap="innerHTML">Preview</button><span style="font-size:.6rem;color:var(--text_muted);margin-left:.3rem">{e.get("size",0)//1024} KB</span>'
+        else:
+            body = f'<button class="cm-qbtn" hx-get="{diff_url.format(path=rp)}" hx-target="#{did}" hx-swap="innerHTML">Diff</button>'
         rows += f"""<div class="glass" style="padding:.5rem .7rem;margin-bottom:.3rem">
             <div style="display:flex;align-items:center;gap:.4rem">
                 <span style="flex:1;font-family:var(--font-mono);font-size:.78rem">{rp}</span>
                 <span style="font-size:.65rem;color:var(--text_muted)">{e.get("author","")}</span>
-                <button class="cm-qbtn" hx-get="{diff_url.format(path=rp)}" hx-target="#{did}" hx-swap="innerHTML">Diff</button>
+                {body}
                 <button class="cm-qbtn" style="color:var(--accent)" hx-post="{accept_url.format(path=rp)}" hx-target="#{list_id}" hx-swap="innerHTML">Accept</button>
                 <button class="cm-qbtn" style="color:#ff5f5f" hx-post="{reject_url.format(path=rp)}" hx-target="#{list_id}" hx-swap="innerHTML">Reject</button>
             </div>
