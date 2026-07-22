@@ -1648,8 +1648,7 @@ class SettingsGroup:
         out = ""
         for f in self.fields:
             val = values.get(f.name, f.default)
-            hint = f'<div style="font-size:.65rem; color:var(--text_muted);">{html.escape(f.hint)}</div>' if f.hint else ""
-            # Module-defined HTMX injection
+            hint = f'<div style="font-size:.6rem; color:var(--text_muted);">{html.escape(f.hint)}</div>' if f.hint else ""
             hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
             if f.type == "select":
                 opts = ""
@@ -1659,7 +1658,7 @@ class SettingsGroup:
                     opts += f'<option value="{html.escape(str(opt_val))}" {selected}>{html.escape(str(opt_lbl))}</option>'
                 out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<select name="{f.name}"{hx_attr} class="module-select" style="width:100%">{opts}</select></label>'
             elif f.type == "number":
-                out += f'<input type="number" step="{f.step}" name="{f.name}" value="{val}" class="module-select">'
+                out += f'<input type="number" step="any" name="{f.name}" value="{val}" class="module-select">'
             elif f.type == "checkbox":
                 checked = "checked" if val else ""
                 out += f'<label style="display:block; margin-bottom:1rem;"><input type="checkbox" name="{f.name}" value="1" {checked}{hx_attr}> {html.escape(f.label)}{hint}</label>'
@@ -2001,44 +2000,6 @@ class ImageGallery:
     .igal-thumb-wrap {aspect-ratio: 1 / 1; width: 100%; }
     .igal-thumb-wrap img { width: 100%; height: 100%; object-fit: contain;}
     """
-
-#     SCRIPT = """
-# if(!window._igalKeysBound){
-#     window._igalKeysBound = true;
-#     document.addEventListener('keydown', function(e){
-#         var lb = document.querySelector('.igal-lightbox');
-#         if(lb){
-#             if(e.key==='ArrowLeft'){ var p=lb.querySelector('.igal-lb-nav.prev'); if(p) p.click(); }
-#             else if(e.key==='ArrowRight'){ var n=lb.querySelector('.igal-lb-nav.next'); if(n) n.click(); }
-#             else if(e.key==='Escape'){ var slot=lb.closest('div[id^="igal-lightbox-slot-"]'); if(slot) slot.innerHTML=''; }
-#             return;
-#         }
-#         if(e.key==='Delete' || e.key==='Backspace'){
-#             var grid = document.activeElement && document.activeElement.closest('[id^="igal-grid-"]');
-#             if(!grid) return;
-#             var checked = grid.querySelectorAll('input[name=delete_targets]:checked');
-#             if(!checked.length) return;
-#             e.preventDefault();
-#             var p = grid.id.replace('igal-grid-','');
-#             if(confirm('Delete '+checked.length+' selected item(s)?')) igalDeleteChecked(p);
-#         }
-#     });
-# }
-# function igalCheckedTargets(p){ return Array.from(document.querySelectorAll('#igal-grid-'+p+' input[name=delete_targets]:checked')).map(function(c){return c.value;}); }
-# function igalDeleteChecked(p){
-#     var dir = document.querySelector('#igal-crumbs-'+p+' [data-active-dir]');
-#     htmx.ajax('POST','/im/in',{values:{type:p+'_delete', branch:p, lvl:2, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
-# }
-
-# function igalMoveConfirm(p, dir){
-#     var checked = document.querySelector('#modal-igal-move-'+p+' input[name=parent]:checked');
-#     var typed = document.getElementById('igal-mv-new-'+p).value.trim();
-#     var dest = typed || (checked ? checked.value : '');
-#     htmx.ajax('POST','/im/in',{values:{type:p+'_move', branch:p, lvl:2, dir:dir, name:dest, delete_targets: JSON.stringify(igalCheckedTargets(p))}, swap:'none'});
-#     UI_closeModal('igal-move-'+p);
-# }
-# """
-    # <script>{self.SCRIPT}</script>
 
     IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
