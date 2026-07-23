@@ -43,6 +43,9 @@
                 @font-face { font-family:'Bitter'; src:url('/static/fonts/Bitter/Bitter-Regular.ttf'); }
                 @font-face { font-family:'Inter'; src:url('/static/fonts/Inter/Inter-Regular.ttf'); }
                 @font-face { font-family:'JetBrains Mono'; src:url('/static/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf'); }
+                @font-face { font-family:'Franklin Gothic Book'; src:url('/static/fonts/franklin-gothic-book-regular/Franklin Gothic Book Regular.ttf'); }
+                @font-face { font-family:'Franklin Gothic Demi'; src:url('/static/fonts/franklin-gothic-demi-regular/Franklin Gothic Demi Regular.ttf'); }
+                @font-face { font-family:'Bauhaus 93'; src:url('/static/fonts/bauhaus/Bauhaus%2093%20Regular.ttf'); format('truetype');}
                 :root {
                     {% for key, val in active_theme.items() %}--{{ key }}: {{ val }};{% endfor %}
                     --font-main: 'Inter', sans-serif;

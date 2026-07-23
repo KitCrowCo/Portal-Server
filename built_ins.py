@@ -725,12 +725,9 @@ class TabManager:
         self.allow_new = allow_new
         self.closable = closable
         self.dedupe_path = dedupe_path
-
-        # Standardize empty fallback structure safely
         if empty is None or not isinstance(empty, dict): self.empty = {"tabs": {}}
         else: self.empty = copy.deepcopy(empty)
         if "tabs" not in self.empty or not isinstance(self.empty["tabs"], dict): self.empty["tabs"] = {}
-
         if self.IM:
             p = self.intent_prefix
             self.IM.scripts[f"{p}_open_tab"]  = [self._open]
@@ -747,22 +744,18 @@ class TabManager:
             active_id = state.get("active")
             current_tab = state.get("tabs", {}).get(active_id, {}) if active_id else {}
             failed_target = current_tab.get("path") or current_tab.get("id") or "Unknown View" # Universal non-web fallback identifier resolution
-
-            # Generic UI error block layout that replaces the dead container area gracefully
-            error_html = f"""
-            <div class="flex flex-col items-center justify-center h-full p-8 text-center bg-base-300 rounded-lg m-4 border border-error/20">
-                <div class="text-5xl mb-3">⛑️</div>
-                <h2 class="text-xl font-bold mb-1">404 - Panel Execution Failed</h2>
-                <p class="text-sm opacity-70 mb-4">The module or view path requested is unavailable or raised an exception.</p>
-                <div class="bg-base-100 p-3 rounded text-left max-w-xl w-full overflow-x-auto border border-base-200 mb-4">
-                    <div class="text-xs font-mono text-warning mb-1">Target Identity: {failed_target}</div>
-                    <pre class="text-xs font-mono text-error whitespace-pre-wrap">{str(e)}</pre>
-                </div>
-                <button class="btn btn-sm btn-outline btn-error" hx-post="/im/in" hx-swap="none" hx-target="body" hx-vals='{{"type": "{self.intent_prefix}_open_tab", "path": "/launcher"}}'>
-                    Return to Launcher
-                </button>
-            </div>
-            """
+            error_html = f"""<div class="flex flex-col items-center justify-center h-full p-8 text-center bg-base-300 rounded-lg m-4 border border-error/20">
+                                 <div class="text-5xl mb-3">⛑️</div>
+                                 <h2 class="text-xl font-bold mb-1">404 - Panel Execution Failed</h2>
+                                 <p class="text-sm opacity-70 mb-4">The module or view path requested is unavailable or raised an exception.</p>
+                                 <div class="bg-base-100 p-3 rounded text-left max-w-xl w-full overflow-x-auto border border-base-200 mb-4">
+                                     <div class="text-xs font-mono text-warning mb-1">Target Identity: {failed_target}</div>
+                                     <pre class="text-xs font-mono text-error whitespace-pre-wrap">{str(e)}</pre>
+                                 </div>
+                                 <button class="btn btn-sm btn-outline btn-error" hx-post="/im/in" hx-swap="none" hx-target="body" hx-vals='{{"type": "{self.intent_prefix}_open_tab", "path": "/launcher"}}'>
+                                     Return to Launcher
+                                 </button>
+                             </div>"""
             return state, error_html
 
     def next_active(self, state, order=None):
@@ -770,23 +763,14 @@ class TabManager:
         if not state or not isinstance(state, dict): state = copy.deepcopy(self.empty)
         tabs = state.setdefault("tabs", {})
         if not isinstance(tabs, dict): tabs = state["tabs"] = {}
-
-        # Core Guard: Ensure at least 1 tab always exists
         if not tabs:
-            if self.empty["tabs"]:
-                state["tabs"] = copy.deepcopy(self.empty["tabs"])
-            else:
-                fallback_id = f"tab-{uuid.uuid4().hex[:6]}"
-                state["tabs"][fallback_id] = {"id": fallback_id, "order": 0, "label": "Home", "path": "/launcher"}
-
-        # Handle active choice resolution
+            if self.empty["tabs"]: state["tabs"] = copy.deepcopy(self.empty["tabs"])
+            else: state["tabs"][fallback_id] = {"id": f"tab-{uuid.uuid4().hex[:6]}", "order": 0, "label": "Home", "path": "/launcher"}
         active = state.get("active")
         if not active or active not in state["tabs"]:
             ordered_tabs = sorted(state["tabs"].values(), key=lambda t: t.get("order", 0) if isinstance(t, dict) else 0)
-            if ordered_tabs and isinstance(ordered_tabs[-1], dict):
-                active = ordered_tabs[-1].get("id", "")
-            else:
-                active = list(state["tabs"].keys())[0]
+            if ordered_tabs and isinstance(ordered_tabs[-1], dict): active = ordered_tabs[-1].get("id", "")
+            else: active = list(state["tabs"].keys())[0]
         state["active"] = active
         return state
 
@@ -809,8 +793,7 @@ class TabManager:
     async def _push(self, request, state = None, imr = None):
         if not state: state = await self._load(request)
         state = self.next_active(state)
-        # Routed through the internal safety wrapper
-        state, content_html = await self.safe_render_content(request, state)
+        state, content_html = await self.safe_render_content(request, state) # Routed through the internal safety wrapper
         bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable)
         await self._save(request, state)
         imr.oob(bar_html, self.tab_bar_id, swap="outerHTML")
@@ -867,7 +850,7 @@ class TabManager:
         bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable)
         imr.oob(bar_html, self.tab_bar_id, swap="outerHTML")
         return imr
-    
+
     def push_history(self, tab: dict, old_path: str):
         """Call before overwriting tab['path'] in any same-tab navigation to enable _back."""
         if old_path:
@@ -885,7 +868,6 @@ class TabManager:
 
 # --- Chat Manager ---
 # Reusable chat UI - bubble/list/compact/log view styles, HTMX-native, stream-aware.
-# Used by Athena, RP Server, Project Chat, and any message-stream consumer (logs etc).
 
 CHAT_CSS = """
 .cm-shell{display:flex;flex-direction:column;height:100%;width:100%;overflow:hidden;box-sizing:border-box;align-items:center;}
@@ -1095,8 +1077,7 @@ class ChatManager:
         meta_right = " ".join(filter(None, [ts] + info_parts + ([tok_count] if tok_count else [])))
         edited = ' <span style="opacity:.5;font-size:.58rem">(edited)</span>' if msg.get("edited") else ""
         meta = f'<div class="cm-meta">{meta_left}{" - " if meta_left and meta_right else ""}{meta_right}{edited}</div>' if (meta_left or meta_right) else ""
-        # data-raw stores original markdown for copy
-        bubble = f'<div class="cm-bubble" id="cm-bubble-{mid}" data-raw="{UI.escape(content_raw)}">{meta}<div class="cm-content">{content}</div>{think_html}</div>'
+        bubble = f'<div class="cm-bubble" id="cm-bubble-{mid}" data-raw="{UI.escape(content_raw)}">{meta}<div class="cm-content">{content}</div>{think_html}</div>' # data-raw stores original markdown for copy
         acts = []
         if self.allow_copy and mid: acts.append(f"""<button class="cm-act" onclick="navigator.clipboard.writeText(document.getElementById('cm-bubble-{mid}').dataset.raw||'')" title="Copy markdown">&#x2398;</button>""")
         if can_edit and self.allow_edit and mid and self.base_url: acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>')
@@ -1172,7 +1153,7 @@ class ChatManager:
         msg_html = self.render_message(message_dict, is_me=is_me, can_edit=is_me, can_delete=True)
         return f'<div id="cm-msgs-{sid}" hx-swap-oob="beforeend">{msg_html}</div>'
 
-    def append_system_error_html(self, sid: str, error_msg: str) -> str: return f'<div id="cm-msgs-{sid}" hx-swap-oob="beforeend"><div class="cm-sys-error" style="color:#ff5f5f;font-size:.78rem;padding:.3rem .6rem">Error: {UI.escape(error_msg)}</div></div>' # Structures an isolated error report within the message container timeline.
+    def append_system_error_html(self, sid: str, error_msg: str) -> str: return f'<div id="cm-msgs-{sid}" hx-swap-oob="beforeend"><div class="cm-sys-error" style="color:#ff5f5f;font-size:.8rem; padding:.2rem .4rem">Error: {UI.escape(error_msg)}</div></div>' # Structures an isolated error report within the message container timeline.
 
 # --- Text File Editor ---
 
@@ -1322,16 +1303,14 @@ class PortalEditor:
         if self.IM: return "/im/in", f"""hx-vals='{{"type":"{self.intent_prefix}_{action_name}", "branch":"{did}", "lvl":{self.nesting_level}}}'"""
         return f"{self.base_url}/doc/{action_name}/{did}", ""
 
-    def _action_payload(self, did: str, action: str) -> str:
-        """JSON object literal (JS source) mirroring _get_action_url's hx-vals, for programmatic htmx.ajax() calls."""
-        return json.dumps({"type": f"{self.intent_prefix}_{action}", "branch": did, "lvl": self.nesting_level}) if self.IM else "{}"
+    def _action_payload(self, did: str, action: str) -> str: return json.dumps({"type": f"{self.intent_prefix}_{action}", "branch": did, "lvl": self.nesting_level}) if self.IM else "{}" #JSON object literal (JS source) mirroring _get_action_url's hx-vals, for programmatic htmx.ajax() calls.
 
     def _settings_btn(self, did: str, icon: str, title: str, patch: dict, active: bool = False) -> str:
         url, vals = self._get_action_url("settings", did)
         extra = "".join(f', "{k}":{json.dumps(v)}' for k, v in patch.items())
         vals = vals.replace('}', f'{extra}}}') if self.IM else f"hx-vals='{json.dumps(patch)}'"
         return f"""<button type="button" class="btn-icon {"active" if active else ""}" title="{title}" hx-post="{url}" {vals} hx-include="#doc-textarea-{did}" hx-target="#editor-shell-{did}" hx-swap="outerHTML">{icon}</button>"""
-    
+
     def render_shell(self, doc: dict, settings = {}, include_css: bool = True) -> str:
         did = doc["id"]; s = self._settings(doc, settings)
         style_tag = f"<style>{self.CSS}</style>" if include_css else ""
@@ -1361,7 +1340,7 @@ class PortalEditor:
             val_payload = f', "view":"{v}"' if self.IM else f"""hx-vals='{{"view":"{v}"}}'"""
             if self.IM: vals = vals.replace('}', f'{val_payload}}}')
             return f"""<button class="ui-btn {"active" if v == view else ""}" style="padding:0.3rem 0.6rem; font-size:0.85rem;" hx-post="{url}" {vals} hx-include="#doc-textarea-{did}" hx-target="#editor-shell-{did}" hx-swap="outerHTML">{label}</button>"""
-        
+
         url_rename, vals_rename = self._get_action_url("rename", did)
         url_search, vals_search = self._get_action_url("search_form", did)
         url_info, vals_info = self._get_action_url("info", did)
@@ -1598,11 +1577,10 @@ class SettingField:
         self.default = default if default is not None else ({} if type == "json" else "")
         self.options = options if options is not None else []
         self.hint = hint
-        # Agnostic HTMX properties delegated to the calling module
         self.hx_get = hx_get
         self.hx_target = hx_target
         self.step = step if step is not None else ("any" if isinstance(default, float) else 1)
-        
+
     def get_options(self, values=None):
         if callable(self.options):
             try: return self.options(values)
@@ -1636,7 +1614,6 @@ class SettingsGroup:
                 try: data[f.name] = float(raw) if raw else 0
                 except: data[f.name] = f.default
             elif f.type == "json":
-                # Safely parse JSON textareas back into dicts
                 try: data[f.name] = json.loads(raw) if raw.strip() else {}
                 except: data[f.name] = f.default or {}
             else:
@@ -1681,10 +1658,12 @@ class SettingsPanel:
         return default
     def get_all(self): return {g.name: g.load() for g in self.groups}
     def get_group(self, name): return next((g for g in self.groups if g.name == name), None)
-
     def page_shell(self, body_html: str, close_url: str = "", target_id: str = "", title: str = None) -> str:
-        close_btn = f'<button type="button" class="close-btn" style="position:absolute;top:1.2rem; right:1.2rem" hx-get="{close_url}" hx-target="#{target_id}" hx-swap="innerHTML">&#x2715;</button>' if (close_url and target_id) else ""
-        return f'<div style="padding:1.5rem;max-width:40rem;position:relative;height:100%;overflow-y:auto;box-sizing:border-box">{close_btn}<h2 style="margin:0 0 1rem; font-size:1rem">{UI.escape(title or self.title)}</h2>{body_html}</div>'
+        return f"""<div style="padding:1.5rem; max-width:40rem; position:relative; height:100%; overflow-y:auto; box-sizing:border-box">
+                       {f'<button type="button" class="close-btn" style="position:absolute;top:1.2rem; right:1.2rem" hx-get="{close_url}" hx-target="#{target_id}" hx-swap="innerHTML">&#x2715;</button>' if (close_url and target_id) else ""}
+                       <h2 style="margin:0 0 1rem; font-size:1rem">{UI.escape(title or self.title)}</h2>
+                       {body_html}
+                    </div>"""
 
 # --- File Manager ---
 # General-purpose, root-isolated file I/O. Optional IM/TM injection wires standard open/save intents for any module that wants file-backed tabs without reimplementing this.
@@ -1743,7 +1722,7 @@ class FileManager:
         path.write_text(content, encoding="utf-8")
         self._trigger_change(rel_path, "modified")
         return True
-    
+
     def write_bytes(self, rel_path: str, content: bytes) -> bool:
         path = self.resolve(rel_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1817,18 +1796,15 @@ class FileManager:
         return out
 
     def folder_picker_html(self, selected: str = "", filter_fn = None) -> str:
-        """Collapsible folder tree for 'pick a destination' UIs - expand/collapse per folder instead of always-expanded.
-        filter_fn (e.g. wiki's per-page view-access check) is still respected."""
+        """Collapsible folder tree for 'pick a destination' UIs - expand/collapse per folder instead of always-expanded. filter_fn (e.g. wiki's per-page view-access check) is still respected."""
         def _walk(rel="", depth=0):
             out = ""
             for child_rel, d, _ in UI.list_children(self.resolve(rel), self.root, filter_fn, dirs_only=True):
                 children_html = _walk(child_rel, depth + 1)
                 is_ancestor = selected == child_rel or selected.startswith(child_rel + "/")
                 radio = f"""<input type="radio" name="parent" value="{child_rel}" {"checked" if child_rel == selected else ""} onclick="event.stopPropagation()">"""
-                if children_html:
-                    out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9}rem;font-size:.78rem;cursor:pointer;list-style:none;">{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
-                else:
-                    out += f"""<label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{(depth+1)*0.9}rem;font-size:.78rem;cursor:pointer;">{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
+                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9}rem;font-size:.78rem;cursor:pointer;list-style:none;">{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
+                else: out += f"""<label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{(depth+1)*0.9}rem;font-size:.78rem;cursor:pointer;">{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
             return out
         return f"""<div style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.78rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""}> &#x1F4C1; (root)</label>{_walk()}</div>"""
     
@@ -1877,10 +1853,7 @@ class FileManager:
         if default_ext and "." not in clean: clean = f"{clean}.{default_ext.lstrip('.')}"
         return self.resolve(parent_rel) / clean
 
-    def safe_rel(self, rel_path: str) -> str:
-        """Sanitizes every segment of a relative path while preserving directory structure - for uploads that carry their own relative path (webkitdirectory folder uploads)."""
-        parts = [sanitize_filename(p) for p in rel_path.replace("\\","/").split("/") if p not in ("", ".", "..")]
-        return "/".join(parts)
+    def safe_rel(self, rel_path: str) -> str: return "/".join([sanitize_filename(p) for p in rel_path.replace("\\","/").split("/") if p not in ("", ".", "..")]) # Sanitizes every segment of a relative path while preserving directory structure - for uploads that carry their own relative path.
 
 # --- File Browser UI Helpers ---
 # Shared modal fragments for any module backed by a FileManager + UI.tree. Pure HTML builders - callers own their own routes/access checks/intent names. target_id="body" (default) pairs with the IM-driven OOB convention used everywhere else in this codebase; pass a real div id + swap="innerHTML" for modules whose create/move routes return a plain HTML fragment instead (e.g. a tree panel).
@@ -1921,22 +1894,19 @@ def new_item_modal_html(modal_id: str, create_url: str, picker_html: str, target
 
 def move_modal_html(modal_id: str, move_url: str, picker_html: str, item_path: str, target_id: str = "body", swap: str = "none") -> str:
     """Form field: path (hidden, item_path), parent (from picker_html)."""
-    body = f"""<form hx-post="{move_url}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex;flex-direction:column;gap:.6rem">
-                    <input type="hidden" name="path" value="{UI.escape(item_path)}">
-                    <div style="font-size:.75rem;color:var(--text_muted)">Move &ldquo;{UI.escape(item_path)}&rdquo; to:</div>
-                    {picker_html}
-                    <button type="submit" class="ui-btn" style="margin-top:.3rem">Move</button>
-                </form>"""
-    return UI.modal(modal_id, "Move Item", body)
+    return UI.modal(modal_id, "Move Item", f"""<form hx-post="{move_url}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex; flex-direction:column; gap:.4rem">
+                                                   <input type="hidden" name="path" value="{UI.escape(item_path)}">
+                                                   <div style="font-size:.7rem;color:var(--text_muted)">Move &ldquo;{UI.escape(item_path)}&rdquo; to:</div>
+                                                   {picker_html}
+                                                   <button type="submit" class="ui-btn" style="margin-top:.3rem">Move</button>
+                                               </form>""")
 
 # --- Image Tools ---
 
 THUMB_MAX_SIDE = 220
 
 def thumb_data_uri(fm, rel: str, max_side: int = THUMB_MAX_SIDE) -> str:
-    """
-    Cached, downscaled JPEG thumbnail as a data: URI. Generated once per (path, mtime, size) under <fm.root>/.thumbs/ and reused on every later render ".thumbs" starts with a dot, so UI.list_children's default skip_hidden already excludes it from folder listings — no extra filtering needed.
-    """
+    """Cached, downscaled JPEG thumbnail as a data: URI. Generated once per (path, mtime, size) under <fm.root>/.thumbs/ and reused on every later render ".thumbs" starts with a dot, so UI.list_children's default skip_hidden already excludes it from folder listings — no extra filtering needed."""
     try:
         src = fm.resolve(rel)
         if not src.exists(): return ""
@@ -2035,23 +2005,21 @@ class ImageGallery:
         dirs, files = [], []
         for child_rel, path, is_dir in UI.list_children(root, root):   # <-- rel_to=root, not self.fm.root
             full_rel = f"{rel_dir}/{child_rel}".strip("/") if rel_dir else child_rel
-            if is_dir:
-                dirs.append((full_rel, path.name))
-            elif path.suffix.lower() in self.IMG_EXTS:
-                files.append((full_rel, path.name, path.stat().st_mtime))
+            if is_dir: dirs.append((full_rel, path.name))
+            elif path.suffix.lower() in self.IMG_EXTS: files.append((full_rel, path.name, path.stat().st_mtime))
         files.sort(key=lambda x: x[2], reverse=True)
         return dirs, files
 
     def render_shell(self, rel_dir: str = "", include_css: bool = True) -> str:
         style_tag = f"<style>{self.CSS}</style>" if include_css else ""
-        return f"""{style_tag}<div class="igal-shell" id="igal-shell-{self.intent_prefix}">
-            {self._crumbs_html(rel_dir)}
-            <div class="igal-grid" id="igal-grid-{self.intent_prefix}" tabindex="0">{self.grid_html(rel_dir)}</div>
-            <div id="igal-lightbox-slot-{self.intent_prefix}"></div>
-        </div>
-        <button class="cm-qbtn" style="position:absolute;top:.3rem;right:.3rem;z-index:5;color:#ff4444" onclick="igalDeleteChecked('{self.intent_prefix}')" title="Delete selected">&#x1F5D1;</button>"""
+        return f"""{style_tag}
+                   <div class="igal-shell" id="igal-shell-{self.intent_prefix}">
+                       {self._crumbs_html(rel_dir)}
+                       <div class="igal-grid" id="igal-grid-{self.intent_prefix}" tabindex="0">{self.grid_html(rel_dir)}</div>
+                       <div id="igal-lightbox-slot-{self.intent_prefix}"></div>
+                   </div>
+                   <button class="cm-qbtn" style="position:absolute;top:.3rem;right:.3rem;z-index:5;color:#ff4444" onclick="igalDeleteChecked('{self.intent_prefix}')" title="Delete selected">&#x1F5D1;</button>"""
 
-    # lightbox_html — close button now clears the slot (plain innerHTML swap), no DOM-removal JS, no dangling element to leak if the page is swapped elsewhere.
     def lightbox_html(self, rel_dir: str, index: int) -> str:
         _, files = self._entries(rel_dir)
         if not files: return ""
@@ -2062,10 +2030,19 @@ class ImageGallery:
         prev_btn = f"""<button class="igal-lb-nav prev" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index-1)%len(files))}'>&#x2039;</button>""" if len(files) > 1 else ""
         next_btn = f"""<button class="igal-lb-nav next" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index+1)%len(files))}'>&#x203A;</button>""" if len(files) > 1 else ""
         return f"""<div class="igal-lightbox" onclick="if(event.target===this) this.innerHTML=''">
-            <div class="igal-lb-top"><span>{UI.escape(name)} &middot; {index+1}/{len(files)}</span><span style="cursor:pointer" onclick="document.getElementById('igal-lightbox-slot-{p}').innerHTML=''">&#x2715;</span></div>
-            <div class="igal-lb-body">{prev_btn}<img id="igal-lb-img-{p}" src="{self._data_uri(full_rel)}" onwheel="event.preventDefault();var s=(this.dataset.z||1)*1+(event.deltaY<0?.15:-.15);s=Math.max(1,Math.min(s,4));this.dataset.z=s;this.style.transform='scale('+s+')'">{next_btn}</div>
-            <div class="igal-lb-bottom"><button class="cm-qbtn" onclick="document.getElementById('igal-lb-img-{p}').dataset.z=1;document.getElementById('igal-lb-img-{p}').style.transform='scale(1)'">Reset zoom</button></div>
-        </div>"""
+                       <div class="igal-lb-top">
+                       <span>{UI.escape(name)} &middot; {index+1}/{len(files)}</span>
+                       <span style="cursor:pointer" onclick="document.getElementById('igal-lightbox-slot-{p}').innerHTML=''">&#x2715;</span>
+                   </div>
+                   <div class="igal-lb-body">
+                       {prev_btn}
+                       <img id="igal-lb-img-{p}" src="{self._data_uri(full_rel)}" onwheel="event.preventDefault(); var s=(this.dataset.z||1)*1+(event.deltaY<0?.15:-.15); s=Math.max(1,Math.min(s,4)); this.dataset.z=s; this.style.transform='scale('+s+')'">
+                       {next_btn}
+                   </div>
+                   <div class="igal-lb-bottom">
+                       <button class="cm-qbtn" onclick="document.getElementById('igal-lb-img-{p}').dataset.z=1;document.getElementById('igal-lb-img-{p}').style.transform='scale(1)'">Reset zoom</button>
+                   </div>
+                   </div>"""
 
     async def _im_browse(self, request, payload, imr):
         rel_dir = payload.get("dir", "")
@@ -2215,7 +2192,7 @@ class ShadowStore:
         self.fm = fm
         self.dir = Path(store_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
-        
+
     def _key(self, rel_path): return hashlib.sha1(rel_path.encode()).hexdigest()[:20]
     def _sp(self, rel_path): return self.dir / f"{self._key(rel_path)}.json"
     def _bp(self, rel_path): return self.dir / f"{self._key(rel_path)}.bin"
@@ -2293,7 +2270,7 @@ class ShadowStore:
         if f.suffix == ".txt": self._apply_text({"path": rel_path, "proposed": f.read_text()})
         else: self._bp(rel_path).write_bytes(f.read_bytes()); self._apply_binary(rel_path); self._bp(rel_path).unlink(missing_ok=True)
         return True
-    
+
 def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str, preview_url: str = "", list_id: str = "shadow-review-list") -> str:
     pend = shadow.pending()
     if not pend: return '<div style="color:var(--text_muted);font-size:.8rem;padding:.5rem">No pending changes.</div>'
@@ -2347,10 +2324,10 @@ def prompt_block_picker_html(library: "PromptBlockLibrary", textarea_id: str, sa
     blocks = library.list()
     opts = "".join(f'<option value="{b["id"]}" data-text="{UI.escape(b["text"])}">{UI.escape(b["name"])}</option>' for b in blocks) or '<option value="">(no blocks saved)</option>'
     return f"""<div class="pb-picker" data-save-url="{save_url}" style="display:flex;gap:.3rem;align-items:center;margin:.2rem 0">
-        <select class="pb-select module-select" style="font-size:.68rem;flex:1" data-target="{textarea_id}">{opts}</select>
-        <button type="button" class="cm-qbtn" onclick="pbInsert(this)">&#x2193; Insert</button>
-        <button type="button" class="cm-qbtn" onclick="pbSaveAs(this)">&#x1F4BE; Save as block</button>
-    </div>"""
+                   <select class="pb-select module-select" style="font-size:.68rem;flex:1" data-target="{textarea_id}">{opts}</select>
+                   <button type="button" class="cm-qbtn" onclick="pbInsert(this)">&#x2193; Insert</button>
+                   <button type="button" class="cm-qbtn" onclick="pbSaveAs(this)">&#x1F4BE; Save as block</button>
+               </div>"""
 
 PROMPT_BLOCK_JS = """
 function pbInsert(btn){
