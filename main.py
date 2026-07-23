@@ -299,7 +299,7 @@ async def handle_login(response: Response, request: Request, username: str = For
         next_url = next if next.startswith("/") else "/"
         response.headers["HX-Redirect"] = next_url
         return {"status": "ok"}
-    return HTMLResponse("<span style='color:#ff4d4f;'>&#x26A0; Invalid username or password.</span>", status_code=401)
+    return HTMLResponse("<span style='color:#ff4d4f;'>&#x26A0; Invalid username or password.</span>")
 
 @app.get("/logout")
 async def logout(request: Request, response: Response):
@@ -394,6 +394,18 @@ _shell_im = InterfaceManager(nesting_level = -1, db_path="im_registry.db") # Lev
 _portal_im = InterfaceManager(nesting_level = 0, db_path="im_registry.db") # Level 0: dashboard content - tab navigation, portal-level tab state
 _pre = "_portal"
 TM = bf.TabManager(namespace = "_nav", tab_bar_id = "portal-nav-bar-inner", content_id = "content-root", render_content_fn = _render_content_area, intent_prefix = _pre, IM = _portal_im, empty = {"tabs": {"launcher-0": {"id": "launcher-0", "path": "/launcher", "label": "Module Launcher", "icon": "", "order": 0}}, "active": "launcher-0"}, nesting_level = 0)
+
+async def _h_portal_init(request, payload, imr):
+    """Re-syncs the content area to the current nav/tab state for the shell_uuid the client just rendered - handles reconnects and stale OOB targets after a hard refresh."""
+    target = payload.get("target", "")
+    if not target: return imr
+    state = await get_state(request, scope="user", namespace="_nav") or {}
+    state, content_html = await _render_content_area(request, state)
+    imr.oob(content_html, target)
+    return imr
+
+_portal_im.scripts["portal_init"] = [_h_portal_init]
+
 
 # # Needs Review ********************************************************************************
 # _shell_im.scripts["set_bridge"] = [lambda request, payload, imr: _handle_bridge_state(request, payload, imr)]

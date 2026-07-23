@@ -2073,6 +2073,7 @@ class ImageGallery:
         new_name = (payload.get("name") or "").strip()
         rel_dir = payload.get("dir", "")
         if not rel_path or not new_name: return imr
+        if "." not in new_name: new_name += Path(rel_path).suffix  # rename prompt often omits the extension - keep the original one rather than silently dropping it
         try:
             self.fm.rename(rel_path, new_name)
         except Exception as e:
@@ -2129,7 +2130,16 @@ class ImageGallery:
             meta_vals = json.dumps({"type": f"{p}_meta", "branch": p, "lvl": self.nesting_level, "path": full_rel})
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
             thumb_uri = thumb_data_uri(self.fm, full_rel)
-            cells += f"""<div class="igal-card"><input type="checkbox" class="igal-checkbox" name="delete_targets" value="{_safe(full_rel)}"><div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{lb_vals}'><img src="{thumb_uri}" loading="lazy" alt="{_safe(name)}"></div><div class="igal-card-footer"><span title="{_safe(name)}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{meta_vals}' title="Info">&#x2139;</button><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename to:" title="Rename">&#x270E;</button></div></div>"""
+            cells += f"""<div class="igal-card">
+                             <input type="checkbox" class="igal-checkbox" name="delete_targets" value="{_safe(full_rel)}">
+                             <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{lb_vals}'><img src="{thumb_uri}" loading="lazy" alt="{_safe(name)}"></div>
+                             <div class="igal-card-footer">
+                                 <span title="{_safe(name)}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span>
+                                 <a class="igal-item-btn" href="{self._data_uri(full_rel)}" download="{_safe(name)}" title="Download">&#x2B07;</a>
+                                 <button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{meta_vals}' title="Info">&#x2139;</button>
+                                 <button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename to:" title="Rename">&#x270E;</button>
+                             </div>
+                         </div>"""
         if not cells: cells = """<div style="grid-column:1/-1;color:var(--text_muted);padding:1rem;font-size:.7rem">Empty folder.</div>"""
         return cells
 

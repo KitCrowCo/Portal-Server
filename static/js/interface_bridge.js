@@ -37,7 +37,7 @@ const IB = (() => {
         { id:'enter',          icon:'&#x23CE;', label:'Enter', fn:() => _simKey('Enter') },
         { id:'escape',         icon:'&#x238B;', label:'Esc',   fn:() => _simKey('Escape') },
         { id:'tab_key',        icon:'&#x21E5;', label:'Tab',   fn:() => _simKey('Tab') },
-        { id:'pointer_toggle', icon:'&#x2316;', label:'Ptr',   fn:() => { cfg('pointer', !_cfg.pointer); htmx.ajax('POST', '/im/intent', { values: { type: 'set_cfg', key: 'pointer', value: String(_cfg.pointer) }, swap: 'none' });
+        { id:'pointer_toggle', icon:'&#x2316;', label:'Ptr',   fn:() => { cfg('pointer', !_cfg.pointer); htmx.ajax('POST', '/in/in', { values: { type: 'set_cfg', key: 'pointer', value: String(_cfg.pointer) }, swap: 'none' });
         }},
     ];
     const _uByID = Object.fromEntries(UNIVERSAL.map(a => [a.id, a]));
@@ -239,7 +239,7 @@ const IB = (() => {
     }
     // -- Clipboard Middleware --
     const clipboard = {
-        copy(text) { _cbValue = text; htmx.ajax('POST', '/im/intent', { values: { type: 'clipboard_set', value: text }, swap: 'none' }); navigator.clipboard?.writeText(text).catch(() => {}); },
+        copy(text) { _cbValue = text; htmx.ajax('POST', '/in/in', { values: { type: 'clipboard_set', value: text }, swap: 'none' }); navigator.clipboard?.writeText(text).catch(() => {}); },
         paste(fn) {
             if (_cbValue !== null) { fn(_cbValue); return; }
             fetch('/im/clipboard').then(r => r.json()).then(d => { _cbValue = d.value ?? ''; fn(_cbValue); }).catch(() => navigator.clipboard?.readText().then(fn).catch(() => fn('')));
@@ -319,7 +319,7 @@ const IB = (() => {
             e.preventDefault();
             if (typeof action.fn === 'function') action.fn();
             else if (typeof action.fn === 'string') try { new Function(action.fn)(); } catch(err) { console.warn('IB fn:', err); }
-            else if (action.intent) htmx.ajax('POST', '/im/intent', { values: { type: action.intent }, swap: 'none' });
+            else if (action.intent) htmx.ajax('POST', '/in/in', { values: { type: action.intent }, swap: 'none' });
         });
         return btn;
     }
@@ -405,7 +405,7 @@ const IB = (() => {
         const btn     = document.getElementById('im-bridge-toggle');
         if (wrapper) wrapper.style.display = _open ? 'flex' : 'none';
         if (btn) btn.innerHTML = (_open ? '&#x2304;' : '&#x2303;') + ' Bridge';
-        htmx.ajax('POST', '/im/intent', { values: { type: 'set_bridge', open: String(_open) }, swap: 'none' });
+        htmx.ajax('POST', '/in/in', { values: { type: 'set_bridge', open: String(_open) }, swap: 'none' });
     }
     function setModuleActions(actions) { _modActions = actions || []; _render(); }
     function cfg(key, val) { _cfg[key] = val; if (key === 'pointer') _vpSetActive(val);}
@@ -425,4 +425,19 @@ const IB = (() => {
         }
     }
     return { toggle, setModuleActions, cfg, init, attachWS, clipboard };
-})();
+})()
+// --- Tab drag-reorder ---
+// Wired to the data-* attrs UI.tab()/tab_bar_from_state already emit: data-tab-id (hyphenated -> dataset.tabId), data-reorder_type / data-branch / data-lvl (underscore variants stay literal in dataset, not camelCased).
+function tabDragStart(e) {
+	var tab = e.target.closest('.tab[data-tab-id]');
+	if (!tab) return;
+	e.dataTransfer.setData('text/tab-id', tab.dataset.tabId);
+	e.dataTransfer.effectAllowed = 'move';
+}
+function tabDrop(e) {
+	e.preventDefault();
+	var srcId = e.dataTransfer.getData('text/tab-id');
+	var dstTab = e.target.closest('.tab[data-tab-id]');
+	if (!srcId || !dstTab || dstTab.dataset.tabId === srcId) return;
+	htmx.ajax('POST', '/im/in', { values: { type: dstTab.dataset.reorder_type, branch: dstTab.dataset.branch, lvl: dstTab.dataset.lvl, from: srcId, to: dstTab.dataset.tabId }, swap: 'none' });
+};
