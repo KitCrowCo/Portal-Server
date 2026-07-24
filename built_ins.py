@@ -1511,7 +1511,7 @@ class PortalEditor:
                 try: self.fm.write(tab["path"], payload["content"]); doc["content"] = payload["content"]
                 except Exception: pass
         return imr.raw(self.render_shell(doc, include_css=False))
-    
+
     async def _im_preview(self, request, payload, imr):
         doc = await self._get_doc_from_state(request, payload)
         zoom = doc.get("settings", {}).get("zoom", 1.0)
@@ -1566,20 +1566,16 @@ class PortalEditor:
         doc["content"] = new_content
         zoom = doc.get("settings", {}).get("zoom", 1.0)
         return imr.raw(self.render_preview(new_content, zoom=zoom, task_interactive=True, doc_id=doc["id"], path=doc.get("path",""), **self.render_kwargs_fn()))
-    
+
 # --- Settings Manager (Strictly Agnostic) ---
 
 class SettingField:
-    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_get=None, hx_target=None, step =None):
-        self.name = name
-        self.label = label
-        self.type = type
+    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_get=None, hx_target=None, step=None, min=None, max=None):
+        self.name, self.label, self.type = name, label, type
         self.default = default if default is not None else ({} if type == "json" else "")
-        self.options = options if options is not None else []
-        self.hint = hint
-        self.hx_get = hx_get
-        self.hx_target = hx_target
+        self.options, self.hint, self.hx_get, self.hx_target = options if options is not None else [], hint, hx_get, hx_target
         self.step = step if step is not None else ("any" if isinstance(default, float) else 1)
+        self.min, self.max = min, max  # None = unrestricted on both ends unless the caller has a genuine reason to cap
 
     def get_options(self, values=None):
         if callable(self.options):
@@ -1611,8 +1607,10 @@ class SettingsGroup:
             if f.type == "checkbox":
                 data[f.name] = bool(raw)
             elif f.type == "number":
-                try: data[f.name] = float(raw) if raw else 0
-                except: data[f.name] = f.default
+                try:
+                    v = float(raw) if raw not in (None, "") else f.default
+                    data[f.name] = int(v) if f.step == 1 else v
+                except Exception: data[f.name] = f.default
             elif f.type == "json":
                 try: data[f.name] = json.loads(raw) if raw.strip() else {}
                 except: data[f.name] = f.default or {}
@@ -1621,21 +1619,30 @@ class SettingsGroup:
         with open(self.json_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
 
-    def render(self, values: dict) -> str:
+    def render(self, values: dict, fm=None) -> str:
         out = ""
         for f in self.fields:
             val = values.get(f.name, f.default)
-            hint = f'<div style="font-size:.6rem; color:var(--text_muted);">{html.escape(f.hint)}</div>' if f.hint else ""
+            hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
             hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
-            if f.type == "select":
+            if f.type == "number":
+                attrs = f' step="{f.step}"' + (f' min="{f.min}"' if f.min is not None else "") + (f' max="{f.max}"' if f.max is not None else "")
+                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{f.name}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
+            elif f.type == "file_picker":
+                out += f"""<div style="margin-bottom:1rem">
+                               <label>{html.escape(f.label)}{hint}</label>
+                               <input type="text" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace" placeholder="path or {{template}}">
+                               <div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">
+                                   {fm.folder_picker_html(selected=str(val)) if fm else '<i style="color:var(--text_muted)">No file manager context - path is free-text only here</i>'}
+                                </div>
+                            </div>"""
+            elif f.type == "select":
                 opts = ""
                 for o in f.get_options(values):
                     opt_val, opt_lbl = o if isinstance(o, (tuple, list)) and len(o) == 2 else (o, o)
                     selected = "selected" if str(val) == str(opt_val) else ""
                     opts += f'<option value="{html.escape(str(opt_val))}" {selected}>{html.escape(str(opt_lbl))}</option>'
                 out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<select name="{f.name}"{hx_attr} class="module-select" style="width:100%">{opts}</select></label>'
-            elif f.type == "number":
-                out += f'<input type="number" step="any" name="{f.name}" value="{val}" class="module-select">'
             elif f.type == "checkbox":
                 checked = "checked" if val else ""
                 out += f'<label style="display:block; margin-bottom:1rem;"><input type="checkbox" name="{f.name}" value="1" {checked}{hx_attr}> {html.escape(f.label)}{hint}</label>'
@@ -1659,8 +1666,8 @@ class SettingsPanel:
     def get_all(self): return {g.name: g.load() for g in self.groups}
     def get_group(self, name): return next((g for g in self.groups if g.name == name), None)
     def page_shell(self, body_html: str, close_url: str = "", target_id: str = "", title: str = None) -> str:
-        return f"""<div style="padding:1.5rem; max-width:40rem; position:relative; height:100%; overflow-y:auto; box-sizing:border-box">
-                       {f'<button type="button" class="close-btn" style="position:absolute;top:1.2rem; right:1.2rem" hx-get="{close_url}" hx-target="#{target_id}" hx-swap="innerHTML">&#x2715;</button>' if (close_url and target_id) else ""}
+        return f"""<div style="padding:1rem; max-width:40rem; position:relative; height:100%; overflow-y:auto; box-sizing:border-box">
+                       {f'<button type="button" class="close-btn" style="position:absolute;top:2rem; right:2rem" hx-get="{close_url}" hx-target="#{target_id}" hx-swap="innerHTML">&#x2715;</button>' if (close_url and target_id) else ""}
                        <h2 style="margin:0 0 1rem; font-size:1rem">{UI.escape(title or self.title)}</h2>
                        {body_html}
                     </div>"""
@@ -1803,11 +1810,11 @@ class FileManager:
                 children_html = _walk(child_rel, depth + 1)
                 is_ancestor = selected == child_rel or selected.startswith(child_rel + "/")
                 radio = f"""<input type="radio" name="parent" value="{child_rel}" {"checked" if child_rel == selected else ""} onclick="event.stopPropagation()">"""
-                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9}rem;font-size:.78rem;cursor:pointer;list-style:none;">{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
-                else: out += f"""<label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{(depth+1)*0.9}rem;font-size:.78rem;cursor:pointer;">{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
+                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.1rem .3rem;padding-left:{depth*0.9}rem;font-size:.8rem;cursor:pointer;list-style:none;">{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
+                else: out += f"""<label style="display:flex;align-items:center;gap:.1rem;padding:.1rem .1rem;padding-left:{(depth+1)*0.9}rem;font-size:.8rem;cursor:pointer;">{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
             return out
-        return f"""<div style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.78rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""}> &#x1F4C1; (root)</label>{_walk()}</div>"""
-    
+        return f"""<div style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.8rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""}> &#x1F4C1; (root)</label>{_walk()}</div>"""
+
     async def save_uploads(self, parent_rel: str, files: list, rel_paths: list[str] = None, on_complete=None) -> list[str]:
         """Writes a batch of UploadFile objects under parent_rel, sanitizing every path segment..."""
         saved = []
@@ -1973,22 +1980,26 @@ class ImageGallery:
 
     IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
-    def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None):
+    def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None, select_mode=False, on_select=None):
         self.fm = file_manager
         self.IM = IM
         self.intent_prefix = intent_prefix
         self.nesting_level = nesting_level
+        self.select_mode = select_mode
+        self.on_select = on_select
         if self.IM:
             p = self.intent_prefix
             self.IM.scripts[f"{p}_browse"] = [self._im_browse]
-            self.IM.scripts[f"{p}_lightbox"] = [self._im_lightbox]
             self.IM.scripts[f"{p}_create_folder"] = [self._intent_create_folder]
             self.IM.scripts[f"{p}_rename"] = [self._intent_rename]
-            self.IM.scripts[f"{p}_move"] = [self._intent_move]
-            self.IM.scripts[f"{p}_meta"] = [self._intent_meta]
-            self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
-            self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
-            self.IM.scripts[f"{p}_key"] = [self._im_key]
+            if self.select_mode and self.on_select: self.IM.scripts[f"{p}_pick"] = [self.on_select]
+            else:
+                self.IM.scripts[f"{p}_lightbox"] = [self._im_lightbox]
+                self.IM.scripts[f"{p}_move"] = [self._intent_move]
+                self.IM.scripts[f"{p}_meta"] = [self._intent_meta]
+                self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
+                self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
+                self.IM.scripts[f"{p}_key"] = [self._im_key]
 
     def _data_uri(self, rel: str) -> str:
         """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
@@ -2126,6 +2137,14 @@ class ImageGallery:
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
             cells += f"""<div class="igal-folder-wrap"><div class="igal-folder" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{browse_vals}'><span style="font-size:1.8rem">&#x1F4C1;</span><span style="font-size:.68rem;text-align:center;padding:0 .3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90%">{_safe(name)}</span></div><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename folder to:" title="Rename folder">&#x270E;</button></div>"""
         for i, (full_rel, name, _mtime) in enumerate(files):
+            thumb_uri = thumb_data_uri(self.fm, full_rel)
+            if self.select_mode:
+                pick_vals = json.dumps({"type": f"{p}_pick", "branch": p, "lvl": self.nesting_level, "path": full_rel})
+                cells += f"""<div class="igal-card">
+                                 <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{pick_vals}'><img src="{thumb_uri}" loading="lazy" alt="{_safe(name)}"></div>
+                                 <div class="igal-card-footer"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span></div>
+                             </div>"""
+                continue
             lb_vals = json.dumps({"type": f"{p}_lightbox", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "index": i})
             meta_vals = json.dumps({"type": f"{p}_meta", "branch": p, "lvl": self.nesting_level, "path": full_rel})
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
@@ -2194,7 +2213,7 @@ def _safe(s: str) -> str: return str(s).replace("&", "&amp;").replace("<", "&lt;
 
 class ShadowStore:
     """
-    Reversible-write layer over a FileManager. Every AI-produced write - text or binary - stages here first; nothing reaches the real file tree without accept() (or auto_accept, an explicit per-store opt-in, never a default). 
+    Reversible-write layer over a FileManager. Every AI-produced write - text or binary - stages here first; nothing reaches the real file tree without accept() (or auto_accept, an explicit per-store opt-in, never a default).
     This is the "stakes" boundary: the person who owns the data's value stays in the loop for every change, proportional to nothing - it's the same gate whether the change is trivial or precious, because the AI cannot know which is which.
     Binary entries skip diffing (nothing meaningful to diff) but go through the identical stage/accept/reject/rollback lifecycle as text.
     """
