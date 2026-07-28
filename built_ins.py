@@ -1647,50 +1647,6 @@ class SettingsGroup:
             else:
                 out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="{f.type}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
         return out
-    
-    # def render(self, values: dict, fm=None) -> str:
-    #     out = ""
-    #     for f in self.fields:
-    #         val = values.get(f.name, f.default)
-    #         hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
-    #         hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
-    #         if f.type == "number":
-    #             attrs = f' step="{f.step}"' + (f' min="{f.min}"' if f.min is not None else "") + (f' max="{f.max}"' if f.max is not None else "")
-    #             out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{f.name}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
-    #         elif f.type == "file_picker":
-    #             out += f"""<div style="margin-bottom:1rem">
-    #                            <label>{html.escape(f.label)}{hint}</label>
-    #                            <input type="text" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace" placeholder="path or {{template}}">
-    #                            <div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">
-    #                                {fm.folder_picker_html(selected=str(val)) if fm else '<i style="color:var(--text_muted)">No file manager context - path is free-text only here</i>'}
-    #                             </div>
-    #                         </div>"""
-    #         elif f.type == "select":
-    #             opts = ""
-    #             for o in f.get_options(values):
-    #                 opt_val, opt_lbl = o if isinstance(o, (tuple, list)) and len(o) == 2 else (o, o)
-    #                 selected = "selected" if str(val) == str(opt_val) else ""
-    #                 opts += f'<option value="{html.escape(str(opt_val))}" {selected}>{html.escape(str(opt_lbl))}</option>'
-    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<select name="{f.name}"{hx_attr} class="module-select" style="width:100%">{opts}</select></label>'
-    #         elif f.type == "checkbox":
-    #             checked = "checked" if val else ""
-    #             out += f'<label style="display:block; margin-bottom:1rem;"><input type="checkbox" name="{f.name}" value="1" {checked}{hx_attr}> {html.escape(f.label)}{hint}</label>'
-    #         elif f.type == "json":
-    #             val_str = json.dumps(val, indent=2) if isinstance(val, dict) else str(val)
-    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<textarea name="{f.name}"{hx_attr} class="cm-input" style="width:100%; font-family:monospace;" rows="4">{html.escape(val_str)}</textarea></label>'
-    #         elif f.type == "textarea":
-    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<textarea name="{f.name}"{hx_attr} class="cm-input" style="width:100%" rows="4">{html.escape(str(val))}</textarea></label>'
-    #         elif f.type == "file_picker":
-    #             input_id = f"fp-input-{f.name}-{id(self)}"
-    #             picker_html = fm.folder_picker_html(selected=str(val), wire_to_input_id=input_id) if fm else '<i style="color:var(--text_muted)">No file manager context - path is free-text only here</i>'
-    #             out += f"""<div style="margin-bottom:1rem">
-    #                            <label>{html.escape(f.label)}{hint}</label>
-    #                            <input type="text" id="{input_id}" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace" placeholder="path or {{template}}">
-    #                            {picker_html}
-    #                        </div>"""
-    #         else:
-    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<input type="{f.type}" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
-    #     return out
 
 class SettingsPanel:
     def __init__(self, title, groups):
@@ -1952,14 +1908,12 @@ def move_modal_html(modal_id: str, move_url: str, picker_html: str, item_path: s
 
 THUMB_MAX_SIDE = 220
 
-def thumb_data_uri(fm, rel: str, max_side: int = THUMB_MAX_SIDE) -> str:
-    """Cached, downscaled JPEG thumbnail as a data: URI. Generated once per (path, mtime, size) under <fm.root>/.thumbs/ and reused on every later render ".thumbs" starts with a dot, so UI.list_children's default skip_hidden already excludes it from folder listings — no extra filtering needed."""
+def ensure_thumb_cached(fm, rel: str, max_side: int = THUMB_MAX_SIDE) -> Path | None:
     try:
         src = fm.resolve(rel)
-        if not src.exists(): return ""
+        if not src.exists(): return None
         stat = src.stat()
-        thumbs_dir = fm.root / ".thumbs"
-        thumbs_dir.mkdir(exist_ok=True)
+        thumbs_dir = fm.root / ".thumbs"; thumbs_dir.mkdir(exist_ok=True)
         key = hashlib.sha1(f"{rel}|{stat.st_mtime}|{max_side}".encode()).hexdigest()[:24]
         thumb_path = thumbs_dir / f"{key}.jpg"
         if not thumb_path.exists():
@@ -1967,10 +1921,12 @@ def thumb_data_uri(fm, rel: str, max_side: int = THUMB_MAX_SIDE) -> str:
             if img.mode not in ("RGB", "L"): img = img.convert("RGB")
             img.thumbnail((max_side, max_side))
             img.save(thumb_path, format="JPEG", quality=78)
-        data = thumb_path.read_bytes()
-        return f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"
-    except Exception:
-        return ""
+        return thumb_path
+    except Exception: return None
+
+def thumb_data_uri(fm, rel: str, max_side: int = THUMB_MAX_SIDE) -> str:
+    p = ensure_thumb_cached(fm, rel, max_side)
+    return f"data:image/jpeg;base64,{base64.b64encode(p.read_bytes()).decode()}" if p else ""
 
 def _parse_targets(raw) -> list:
     if isinstance(raw, list): return raw
@@ -2177,21 +2133,21 @@ class ImageGallery:
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
             cells += f"""<div class="igal-folder-wrap"><div class="igal-folder" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{browse_vals}'><span style="font-size:1.8rem">&#x1F4C1;</span><span style="font-size:.7rem;text-align:center;padding:0 .3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90%">{_safe(name)}</span></div><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename folder to:" title="Rename folder">&#x270E;</button></div>"""
         for i, (full_rel, name, _mtime) in enumerate(files):
-            thumb_uri = thumb_data_uri(self.fm, full_rel)
+            thumb_url = _u("thumb", full_rel)
             if self.select_mode:
                 pick_vals = json.dumps({"type": f"{p}_pick", "branch": p, "lvl": self.nesting_level, "path": full_rel})
                 cells += f"""<div class="igal-card">
-                                 <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{pick_vals}'><img src="{thumb_uri}" loading="lazy" alt="{_safe(name)}"></div>
+                                 <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{pick_vals}'><img src="{thumb_url}" loading="lazy" alt="{_safe(name)}"></div>
                                  <div class="igal-card-footer"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span></div>
                              </div>"""
                 continue
             lb_vals = json.dumps({"type": f"{p}_lightbox", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "index": i})
             meta_vals = json.dumps({"type": f"{p}_meta", "branch": p, "lvl": self.nesting_level, "path": full_rel})
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
-            thumb_uri = thumb_data_uri(self.fm, full_rel)
+            thumb_url = _u("thumb", full_rel)
             cells += f"""<div class="igal-card">
                              <input type="checkbox" class="igal-checkbox" name="delete_targets" value="{_safe(full_rel)}">
-                             <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{lb_vals}'><img src="{thumb_uri}" loading="lazy" alt="{_safe(name)}"></div>
+                             <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{lb_vals}'><img src="{thumb_url}" loading="lazy" alt="{_safe(name)}"></div>
                              <div class="igal-card-footer">
                                  <span title="{_safe(name)}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span>
                                  <a class="igal-item-btn" href="{self._data_uri(full_rel)}" download="{_safe(name)}" title="Download">&#x2B07;</a>
