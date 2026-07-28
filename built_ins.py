@@ -1619,41 +1619,78 @@ class SettingsGroup:
         with open(self.json_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
 
-    def render(self, values: dict, fm=None) -> str:
+    def render(self, values: dict, fm=None, name_prefix: str = "") -> str:
         out = ""
         for f in self.fields:
             val = values.get(f.name, f.default)
             hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
             hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
-            if f.type == "number":
-                attrs = f' step="{f.step}"' + (f' min="{f.min}"' if f.min is not None else "") + (f' max="{f.max}"' if f.max is not None else "")
-                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{f.name}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
-            elif f.type == "file_picker":
-                out += f"""<div style="margin-bottom:1rem">
-                               <label>{html.escape(f.label)}{hint}</label>
-                               <input type="text" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace" placeholder="path or {{template}}">
-                               <div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">
-                                   {fm.folder_picker_html(selected=str(val)) if fm else '<i style="color:var(--text_muted)">No file manager context - path is free-text only here</i>'}
-                                </div>
-                            </div>"""
-            elif f.type == "select":
-                opts = ""
-                for o in f.get_options(values):
-                    opt_val, opt_lbl = o if isinstance(o, (tuple, list)) and len(o) == 2 else (o, o)
-                    selected = "selected" if str(val) == str(opt_val) else ""
-                    opts += f'<option value="{html.escape(str(opt_val))}" {selected}>{html.escape(str(opt_lbl))}</option>'
-                out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<select name="{f.name}"{hx_attr} class="module-select" style="width:100%">{opts}</select></label>'
+            fname = f"{name_prefix}{f.name}"
+            if f.type == "select":
+                opts = "".join(f'<option value="{html.escape(str(v))}" {"selected" if str(val)==str(v) else ""}>{html.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in f.get_options(values)))
+                select_html = f'<select name="{fname}"{hx_attr} class="module-select" style="width:100%">{opts}</select>'
+                out += (f'<label style="display:block;margin-bottom:1rem" id="{name_prefix}{f.name}_wrap">{html.escape(f.label)}{hint}{select_html}</label>' if f.name == "model" else f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}{select_html}</label>')
+            elif f.type == "number":
+                attrs = f' step="{f.step}"' + (f' min="{f.min}"' if getattr(f,"min",None) is not None else "") + (f' max="{f.max}"' if getattr(f,"max",None) is not None else "")
+                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{fname}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
             elif f.type == "checkbox":
-                checked = "checked" if val else ""
-                out += f'<label style="display:block; margin-bottom:1rem;"><input type="checkbox" name="{f.name}" value="1" {checked}{hx_attr}> {html.escape(f.label)}{hint}</label>'
+                out += f'<label style="display:block;margin-bottom:1rem"><input type="checkbox" name="{fname}" value="1" {"checked" if val else ""}{hx_attr}> {html.escape(f.label)}{hint}</label>'
             elif f.type == "json":
                 val_str = json.dumps(val, indent=2) if isinstance(val, dict) else str(val)
-                out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<textarea name="{f.name}"{hx_attr} class="cm-input" style="width:100%; font-family:monospace;" rows="4">{html.escape(val_str)}</textarea></label>'
+                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%;font-family:monospace" rows="4">{html.escape(val_str)}</textarea></label>'
+            elif f.type == "file_picker":
+                input_id = f"fp-{fname}-{id(self)}"
+                picker_html = fm.folder_picker_html(selected=str(val), wire_to_input_id=input_id) if fm else '<i style="color:var(--text_muted)">No file manager context</i>'
+                out += f'<div style="margin-bottom:1rem"><label>{html.escape(f.label)}{hint}</label><input type="text" id="{input_id}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace"><div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">{picker_html}</div></div>'
             elif f.type == "textarea":
-                out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<textarea name="{f.name}"{hx_attr} class="cm-input" style="width:100%" rows="4">{html.escape(str(val))}</textarea></label>'
+                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%" rows="4">{html.escape(str(val))}</textarea></label>'
             else:
-                out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<input type="{f.type}" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
+                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="{f.type}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
         return out
+    
+    # def render(self, values: dict, fm=None) -> str:
+    #     out = ""
+    #     for f in self.fields:
+    #         val = values.get(f.name, f.default)
+    #         hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
+    #         hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
+    #         if f.type == "number":
+    #             attrs = f' step="{f.step}"' + (f' min="{f.min}"' if f.min is not None else "") + (f' max="{f.max}"' if f.max is not None else "")
+    #             out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{f.name}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
+    #         elif f.type == "file_picker":
+    #             out += f"""<div style="margin-bottom:1rem">
+    #                            <label>{html.escape(f.label)}{hint}</label>
+    #                            <input type="text" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace" placeholder="path or {{template}}">
+    #                            <div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">
+    #                                {fm.folder_picker_html(selected=str(val)) if fm else '<i style="color:var(--text_muted)">No file manager context - path is free-text only here</i>'}
+    #                             </div>
+    #                         </div>"""
+    #         elif f.type == "select":
+    #             opts = ""
+    #             for o in f.get_options(values):
+    #                 opt_val, opt_lbl = o if isinstance(o, (tuple, list)) and len(o) == 2 else (o, o)
+    #                 selected = "selected" if str(val) == str(opt_val) else ""
+    #                 opts += f'<option value="{html.escape(str(opt_val))}" {selected}>{html.escape(str(opt_lbl))}</option>'
+    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<select name="{f.name}"{hx_attr} class="module-select" style="width:100%">{opts}</select></label>'
+    #         elif f.type == "checkbox":
+    #             checked = "checked" if val else ""
+    #             out += f'<label style="display:block; margin-bottom:1rem;"><input type="checkbox" name="{f.name}" value="1" {checked}{hx_attr}> {html.escape(f.label)}{hint}</label>'
+    #         elif f.type == "json":
+    #             val_str = json.dumps(val, indent=2) if isinstance(val, dict) else str(val)
+    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<textarea name="{f.name}"{hx_attr} class="cm-input" style="width:100%; font-family:monospace;" rows="4">{html.escape(val_str)}</textarea></label>'
+    #         elif f.type == "textarea":
+    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<textarea name="{f.name}"{hx_attr} class="cm-input" style="width:100%" rows="4">{html.escape(str(val))}</textarea></label>'
+    #         elif f.type == "file_picker":
+    #             input_id = f"fp-input-{f.name}-{id(self)}"
+    #             picker_html = fm.folder_picker_html(selected=str(val), wire_to_input_id=input_id) if fm else '<i style="color:var(--text_muted)">No file manager context - path is free-text only here</i>'
+    #             out += f"""<div style="margin-bottom:1rem">
+    #                            <label>{html.escape(f.label)}{hint}</label>
+    #                            <input type="text" id="{input_id}" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace" placeholder="path or {{template}}">
+    #                            {picker_html}
+    #                        </div>"""
+    #         else:
+    #             out += f'<label style="display:block; margin-bottom:1rem;">{html.escape(f.label)}{hint}<input type="{f.type}" name="{f.name}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
+    #     return out
 
 class SettingsPanel:
     def __init__(self, title, groups):
@@ -1802,18 +1839,21 @@ class FileManager:
         if out: self._trigger_change(rels + out, "modified")
         return out
 
-    def folder_picker_html(self, selected: str = "", filter_fn = None) -> str:
-        """Collapsible folder tree for 'pick a destination' UIs - expand/collapse per folder instead of always-expanded. filter_fn (e.g. wiki's per-page view-access check) is still respected."""
+    def folder_picker_html(self, selected: str = "", filter_fn = None, wire_to_input_id: str = "") -> str:
+        """Collapsible folder tree for 'pick a destination' UIs. wire_to_input_id, if given, makes every radio option also copy its value into that text input's value on click
+        - the tree becomes a browsing aid for a plain text field rather than a separate, divergent picker.
+        Same widget everywhere: type the path directly, or click to browse and fill it in, never two different pickers for the same job."""
+        onclick_extra = f" this.closest('.folder-picker-root').querySelector('#{wire_to_input_id}').value=this.value;" if wire_to_input_id else ""
         def _walk(rel="", depth=0):
             out = ""
             for child_rel, d, _ in UI.list_children(self.resolve(rel), self.root, filter_fn, dirs_only=True):
                 children_html = _walk(child_rel, depth + 1)
                 is_ancestor = selected == child_rel or selected.startswith(child_rel + "/")
-                radio = f"""<input type="radio" name="parent" value="{child_rel}" {"checked" if child_rel == selected else ""} onclick="event.stopPropagation()">"""
-                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.1rem .3rem;padding-left:{depth*0.9}rem;font-size:.8rem;cursor:pointer;list-style:none;">{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
-                else: out += f"""<label style="display:flex;align-items:center;gap:.1rem;padding:.1rem .1rem;padding-left:{(depth+1)*0.9}rem;font-size:.8rem;cursor:pointer;">{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
+                radio = f"""<input type="radio" name="parent" value="{child_rel}" {"checked" if child_rel == selected else ""} onclick="event.stopPropagation();{onclick_extra}">"""
+                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9}rem;font-size:.78rem;cursor:pointer;list-style:none;">{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
+                else: out += f"""<label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{(depth+1)*0.9}rem;font-size:.78rem;cursor:pointer;">{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
             return out
-        return f"""<div style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.8rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""}> &#x1F4C1; (root)</label>{_walk()}</div>"""
+        return f"""<div class="folder-picker-root" style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.8rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""} onclick="event.stopPropagation();{onclick_extra}"> &#x1F4C1; (root)</label>{_walk()}</div>"""
 
     async def save_uploads(self, parent_rel: str, files: list, rel_paths: list[str] = None, on_complete=None) -> list[str]:
         """Writes a batch of UploadFile objects under parent_rel, sanitizing every path segment..."""
@@ -1949,10 +1989,10 @@ class ImageGallery:
     """
     CSS = """
     .igal-shell{display:flex;flex-direction:column;height:100%;overflow:hidden}
-    .igal-crumbs{display:flex;gap:.3rem;align-items:center;padding:.4rem .6rem;border-bottom:var(--border-thick) solid var(--border);font-size:.75rem;flex-wrap:wrap;flex-shrink:0}
+    .igal-crumbs{display:flex;gap:.3rem;align-items:center;padding:.4rem .6rem;border-bottom:var(--border-thick) solid var(--border);font-size:.7rem;flex-wrap:wrap;flex-shrink:0}
     .igal-crumb{cursor:pointer;color:var(--text_muted)}
     .igal-crumb:hover{color:var(--accent)}
-    .igal-grid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--igal-thumb,10rem),1fr));gap:.5rem;padding:.5rem;align-content:start}
+    .igal-grid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--igal-thumb,10rem),1fr));gap:.2rem;padcursor4rem;align-content:start}
     .igal-folder{display:flex;flex-direction:column;align-items:center;justify-content:center;aspect-ratio:1;cursor:pointer;border:var(--border-thick) solid var(--border);border-radius:var(--radius);gap:.3rem;background:var(--glass)}
     .igal-folder:hover{border-color:var(--accent)}
     .igal-card {position:relative; display:flex; flex-direction:column; overflow:hidden; border-radius:var(--radius); border:var(--border-thick) solid var(--border);}
@@ -1968,11 +2008,11 @@ class ImageGallery:
     .igal-checkbox {position:absolute; top:.4rem; left:.4rem; z-index:10; width:1.2rem; height:1.2rem; cursor:pointer;}
     .igal-controls {margin-left:auto;} /* Pushes the delete button to the right side of the breadcrumbs */
     .igal-folder-wrap { position: relative; }
-    .igal-item-btn { background: none; border: none; color: var(--text_muted); cursor: pointer; font-size: .65rem; padding: .1rem .25rem; border-radius: .2rem; line-height: 1.4; flex-shrink: 0;}
+    .igal-item-btn { background: none; border: none; color: var(--text_muted); cursor: pointer; font-size: .65rem; padding: .1rem .2rem; border-radius: .2rem; line-height: 1.4; flex-shrink: 0;}
     .igal-item-btn:hover { color: var(--accent); background: var(--accent_dim); }
     .igal-folder-wrap .igal-item-btn { position: absolute; top: .2rem; right: .2rem; opacity: 0; transition: opacity .15s; background: var(--bg_panel);}
     .igal-folder-wrap:hover .igal-item-btn { opacity: 1; }
-    .igal-card-footer { display: flex; align-items: center; gap: .15rem; padding: .12rem .25rem; border-top: var(--border-thick) solid var(--border);}
+    .igal-card-footer { display: flex; align-items: center; gap: .1rem; padding: .1rem .2rem; border-top: var(--border-thick) solid var(--border);}
     .igal-grid { grid-auto-rows: max-content; align-items: start; }
     .igal-thumb-wrap {aspect-ratio: 1 / 1; width: 100%; }
     .igal-thumb-wrap img { width: 100%; height: 100%; object-fit: contain;}
@@ -1994,6 +2034,7 @@ class ImageGallery:
             self.IM.scripts[f"{p}_rename"] = [self._intent_rename]
             if self.select_mode and self.on_select: self.IM.scripts[f"{p}_pick"] = [self.on_select]
             else:
+                pass
                 self.IM.scripts[f"{p}_lightbox"] = [self._im_lightbox]
                 self.IM.scripts[f"{p}_move"] = [self._intent_move]
                 self.IM.scripts[f"{p}_meta"] = [self._intent_meta]
@@ -2008,13 +2049,12 @@ class ImageGallery:
             mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
         except Exception:
-            return ""  # broken/missing file -- render a blank cell rather than crash the grid
+            return ""
 
-    # ImageGallery._entries — was passing self.fm.root as rel_to even when listing a subfolder, so list_children() returned paths already relative to the TRUE root, and full_rel then re-prepended rel_dir on top of that -- double-prefixed paths for anything below the first level. rel_to must be the directory being listed.
     def _entries(self, rel_dir: str):
         root = self.fm.resolve(rel_dir)
         dirs, files = [], []
-        for child_rel, path, is_dir in UI.list_children(root, root):   # <-- rel_to=root, not self.fm.root
+        for child_rel, path, is_dir in UI.list_children(root, root): 
             full_rel = f"{rel_dir}/{child_rel}".strip("/") if rel_dir else child_rel
             if is_dir: dirs.append((full_rel, path.name))
             elif path.suffix.lower() in self.IMG_EXTS: files.append((full_rel, path.name, path.stat().st_mtime))
@@ -2135,7 +2175,7 @@ class ImageGallery:
         for full_rel, name in dirs:
             browse_vals = json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": full_rel})
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
-            cells += f"""<div class="igal-folder-wrap"><div class="igal-folder" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{browse_vals}'><span style="font-size:1.8rem">&#x1F4C1;</span><span style="font-size:.68rem;text-align:center;padding:0 .3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90%">{_safe(name)}</span></div><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename folder to:" title="Rename folder">&#x270E;</button></div>"""
+            cells += f"""<div class="igal-folder-wrap"><div class="igal-folder" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{browse_vals}'><span style="font-size:1.8rem">&#x1F4C1;</span><span style="font-size:.7rem;text-align:center;padding:0 .3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90%">{_safe(name)}</span></div><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename folder to:" title="Rename folder">&#x270E;</button></div>"""
         for i, (full_rel, name, _mtime) in enumerate(files):
             thumb_uri = thumb_data_uri(self.fm, full_rel)
             if self.select_mode:
