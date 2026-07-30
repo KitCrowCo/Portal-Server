@@ -1570,12 +1570,13 @@ class PortalEditor:
 # --- Settings Manager (Strictly Agnostic) ---
 
 class SettingField:
-    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_get=None, hx_target=None, step=None, min=None, max=None):
+    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_get=None, hx_target=None, step=None, min=None, max=None, advanced=False):
         self.name, self.label, self.type = name, label, type
         self.default = default if default is not None else ({} if type == "json" else "")
         self.options, self.hint, self.hx_get, self.hx_target = options if options is not None else [], hint, hx_get, hx_target
         self.step = step if step is not None else ("any" if isinstance(default, float) else 1)
-        self.min, self.max = min, max  # None = unrestricted on both ends unless the caller has a genuine reason to cap
+        self.min, self.max = min, max
+        self.advanced = advanced
 
     def get_options(self, values=None):
         if callable(self.options):
@@ -1619,33 +1620,40 @@ class SettingsGroup:
         with open(self.json_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
 
+    def _render_field(self, f, values: dict, fm=None, name_prefix: str = "") -> str:
+        val = values.get(f.name, f.default)
+        hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
+        hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
+        fname = f"{name_prefix}{f.name}"
+        if f.type == "select":
+            opts = "".join(f'<option value="{html.escape(str(v))}" {"selected" if str(val)==str(v) else ""}>{html.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in f.get_options(values)))
+            select_html = f'<select name="{fname}"{hx_attr} class="module-select" style="width:100%">{opts}</select>'
+            return (f'<label style="display:block;margin-bottom:1rem" id="{name_prefix}{f.name}_wrap">{html.escape(f.label)}{hint}{select_html}</label>' if f.name == "model" else f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}{select_html}</label>')
+        if f.type == "number":
+            attrs = f' step="{f.step}"' + (f' min="{f.min}"' if getattr(f,"min",None) is not None else "") + (f' max="{f.max}"' if getattr(f,"max",None) is not None else "")
+            return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{fname}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
+        if f.type == "checkbox":
+            return f'<label style="display:block;margin-bottom:1rem"><input type="checkbox" name="{fname}" value="1" {"checked" if val else ""}{hx_attr}> {html.escape(f.label)}{hint}</label>'
+        if f.type == "json":
+            val_str = json.dumps(val, indent=2) if isinstance(val, dict) else str(val)
+            return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%;font-family:monospace" rows="4">{html.escape(val_str)}</textarea></label>'
+        if f.type == "file_picker":
+            input_id = f"fp-{fname}-{id(self)}"
+            picker_html = fm.folder_picker_html(selected=str(val), wire_to_input_id=input_id) if fm else '<i style="color:var(--text_muted)">No file manager context</i>'
+            return f'<div style="margin-bottom:1rem"><label>{html.escape(f.label)}{hint}</label><input type="text" id="{input_id}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace"><div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">{picker_html}</div></div>'
+        if f.type == "textarea":
+            return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%" rows="4">{html.escape(str(val))}</textarea></label>'
+        return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="{f.type}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
+
     def render(self, values: dict, fm=None, name_prefix: str = "") -> str:
-        out = ""
-        for f in self.fields:
-            val = values.get(f.name, f.default)
-            hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
-            hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
-            fname = f"{name_prefix}{f.name}"
-            if f.type == "select":
-                opts = "".join(f'<option value="{html.escape(str(v))}" {"selected" if str(val)==str(v) else ""}>{html.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in f.get_options(values)))
-                select_html = f'<select name="{fname}"{hx_attr} class="module-select" style="width:100%">{opts}</select>'
-                out += (f'<label style="display:block;margin-bottom:1rem" id="{name_prefix}{f.name}_wrap">{html.escape(f.label)}{hint}{select_html}</label>' if f.name == "model" else f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}{select_html}</label>')
-            elif f.type == "number":
-                attrs = f' step="{f.step}"' + (f' min="{f.min}"' if getattr(f,"min",None) is not None else "") + (f' max="{f.max}"' if getattr(f,"max",None) is not None else "")
-                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{fname}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
-            elif f.type == "checkbox":
-                out += f'<label style="display:block;margin-bottom:1rem"><input type="checkbox" name="{fname}" value="1" {"checked" if val else ""}{hx_attr}> {html.escape(f.label)}{hint}</label>'
-            elif f.type == "json":
-                val_str = json.dumps(val, indent=2) if isinstance(val, dict) else str(val)
-                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%;font-family:monospace" rows="4">{html.escape(val_str)}</textarea></label>'
-            elif f.type == "file_picker":
-                input_id = f"fp-{fname}-{id(self)}"
-                picker_html = fm.folder_picker_html(selected=str(val), wire_to_input_id=input_id) if fm else '<i style="color:var(--text_muted)">No file manager context</i>'
-                out += f'<div style="margin-bottom:1rem"><label>{html.escape(f.label)}{hint}</label><input type="text" id="{input_id}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace"><div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">{picker_html}</div></div>'
-            elif f.type == "textarea":
-                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%" rows="4">{html.escape(str(val))}</textarea></label>'
-            else:
-                out += f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="{f.type}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
+        primary = [f for f in self.fields if not getattr(f, "advanced", False)]
+        advanced = [f for f in self.fields if getattr(f, "advanced", False)]
+        out = "".join(self._render_field(f, values, fm, name_prefix) for f in primary)
+        if advanced:
+            out += (f"""<details style="margin-top:.3rem;margin-bottom:.5rem">
+                            <summary style="cursor:pointer;font-size:.72rem;color:var(--text_muted);list-style:none;user-select:none">&#x25B8; Advanced ({len(advanced)})</summary>
+                            <div style="margin-top:.5rem;padding-left:.6rem;border-left:var(--border-thick) solid var(--border)">{"".join(self._render_field(f, values, fm, name_prefix) for f in advanced)}</div>
+                        </details>""")
         return out
 
 class SettingsPanel:

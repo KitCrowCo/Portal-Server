@@ -238,9 +238,8 @@ def load_modules(module_type="module"):
                 traceback.print_exc()
         admin_router = load_server_router(module_path, item, prefix=module_type, dependencies=router_dependencies, router_type=module_type, path_modifier="", verbose=VERBOSE)
         if admin_router:
-            if os.path.exists(f"{module_path}/static"):
-                os.makedirs(f"./data/{item}/static", exist_ok=True)
-                app.mount(f"/{module_type}/assets/{item}", StaticFiles(directory=f"./data/{item}/static"), name=f"{module_type}_assets_{item}")
+            os.makedirs(f"./data/{item}/static", exist_ok=True)
+            app.mount(f"/{module_type}/assets/{item}", StaticFiles(directory=f"./data/{item}/static"), name=f"{module_type}_assets_{item}")
             if os.path.exists(f"{module_path}/public_{item}.py"):
                 if VERBOSE: print(f"Mounting Public Router: {item}")
                 public_deps = {"templates": templates, "theme": active_theme.config if active_theme else {}, "tools": Tools, "resolve_theme": resolve_theme_full, "get_state": get_state}

@@ -328,13 +328,10 @@ class UI:
 
     @staticmethod
     def collapsible(title: str, content: str, open_: bool = False) -> str: return f'<details {"open" if open_ else ""} style="margin-bottom:0.8rem;"><summary style="font-size:0.8rem;font-weight:600;color:var(--text_muted);cursor:pointer;padding:0.3rem 0;">{title}</summary><div style="padding:0.4rem 0;">{content}</div></details>'
-    
+
     # --- Tree Viewer and Helpers ---
 
-    _TREE_ICONS = {".py":"&#x1F40D;", ".js":"&#x26A1;", ".ts":"&#x26A1;", ".json":"&#x1F4CB;", ".yaml":"&#x1F4CB;", ".yml":"&#x1F4CB;", ".toml":"&#x1F4CB;", ".xml":"&#x1F4CB;",
-                   ".md":"&#x1F4DD;", ".txt":"&#x1F4C4;", ".rst":"&#x1F4C4;", ".csv":"&#x1F4CA;", ".sh":"&#x2699;", ".html":"&#x1F310;", ".css":"&#x1F3A8;",
-                   ".png":"&#x1F5BC;", ".jpg":"&#x1F5BC;", ".jpeg":"&#x1F5BC;", ".gif":"&#x1F5BC;", ".webp":"&#x1F5BC;", ".svg":"&#x1F5BC;",
-                   ".pdf":"&#x1F4D5;", ".zip":"&#x1F4E6;", ".tar":"&#x1F4E6;", ".gz":"&#x1F4E6;", ".db":"&#x1F5C4;", ".log":"&#x1F4DC;"}
+    _TREE_ICONS = {".py":"&#x1F40D;", ".js":"&#x26A1;", ".ts":"&#x26A1;", ".json":"&#x1F4CB;", ".yaml":"&#x1F4CB;", ".yml":"&#x1F4CB;", ".toml":"&#x1F4CB;", ".xml":"&#x1F4CB;", ".md":"&#x1F4DD;", ".txt":"&#x1F4C4;", ".rst":"&#x1F4C4;", ".csv":"&#x1F4CA;", ".sh":"&#x2699;", ".html":"&#x1F310;", ".css":"&#x1F3A8;", ".png":"&#x1F5BC;", ".jpg":"&#x1F5BC;", ".jpeg":"&#x1F5BC;", ".gif":"&#x1F5BC;", ".webp":"&#x1F5BC;", ".svg":"&#x1F5BC;", ".pdf":"&#x1F4D5;", ".zip":"&#x1F4E6;", ".tar":"&#x1F4E6;", ".gz":"&#x1F4E6;", ".db":"&#x1F5C4;", ".log":"&#x1F4DC;"}
     _TREE_ICON_DEFAULT = "&#x1F4C4;"
     _TREE_ICON_FOLDER  = "&#x1F4C1;"
     _TREE_SKIP_DIRS = frozenset({".git", "__pycache__", ".ipynb_checkpoints", ".mypy_cache", ".pytest_cache", "node_modules", ".trash", ".venv", "venv", ".tox", ".ruff_cache"})
