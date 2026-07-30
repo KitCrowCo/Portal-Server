@@ -1570,9 +1570,10 @@ class PortalEditor:
 # --- Settings Manager (Strictly Agnostic) ---
 
 class SettingField:
-    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_get=None, hx_target=None, step=None, min=None, max=None, advanced=False):
+    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_intent=None, hx_target=None, step=None, min=None, max=None, advanced=False, hx_get = None):
         self.name, self.label, self.type = name, label, type
         self.default = default if default is not None else ({} if type == "json" else "")
+        self.hx_intent = hx_intent
         self.options, self.hint, self.hx_get, self.hx_target = options if options is not None else [], hint, hx_get, hx_target
         self.step = step if step is not None else ("any" if isinstance(default, float) else 1)
         self.min, self.max = min, max
@@ -1623,7 +1624,8 @@ class SettingsGroup:
     def _render_field(self, f, values: dict, fm=None, name_prefix: str = "") -> str:
         val = values.get(f.name, f.default)
         hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
-        hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
+        # hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
+        hx_attr = f' hx-post="/im/in" hx-vals=\'{{"type":"{f.hx_intent}"}}\' hx-target="{f.hx_target}" hx-trigger="change" hx-include="closest form"' if (f.hx_intent and f.hx_target) else ""
         fname = f"{name_prefix}{f.name}"
         if f.type == "select":
             opts = "".join(f'<option value="{html.escape(str(v))}" {"selected" if str(val)==str(v) else ""}>{html.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in f.get_options(values)))
@@ -1984,7 +1986,7 @@ class ImageGallery:
 
     IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
-    def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None, select_mode=False, on_select=None):
+    def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None, select_mode=False, on_select=None, thumb_url_fn=None):
         self.fm = file_manager
         self.IM = IM
         self.intent_prefix = intent_prefix
@@ -2005,6 +2007,7 @@ class ImageGallery:
                 self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
                 self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
                 self.IM.scripts[f"{p}_key"] = [self._im_key]
+                self.thumb_url_fn = thumb_url_fn  # callable(rel_path) -> url string, or None to fall back to inline data URI
 
     def _data_uri(self, rel: str) -> str:
         """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
@@ -2141,7 +2144,7 @@ class ImageGallery:
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
             cells += f"""<div class="igal-folder-wrap"><div class="igal-folder" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{browse_vals}'><span style="font-size:1.8rem">&#x1F4C1;</span><span style="font-size:.7rem;text-align:center;padding:0 .3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90%">{_safe(name)}</span></div><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename folder to:" title="Rename folder">&#x270E;</button></div>"""
         for i, (full_rel, name, _mtime) in enumerate(files):
-            thumb_url = _u("thumb", full_rel)
+            thumb_url = self.thumb_url_fn(full_rel) if self.thumb_url_fn else thumb_data_uri(self.fm, full_rel)
             if self.select_mode:
                 pick_vals = json.dumps({"type": f"{p}_pick", "branch": p, "lvl": self.nesting_level, "path": full_rel})
                 cells += f"""<div class="igal-card">
@@ -2152,7 +2155,7 @@ class ImageGallery:
             lb_vals = json.dumps({"type": f"{p}_lightbox", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "index": i})
             meta_vals = json.dumps({"type": f"{p}_meta", "branch": p, "lvl": self.nesting_level, "path": full_rel})
             rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
-            thumb_url = _u("thumb", full_rel)
+            thumb_url = self.thumb_url_fn(full_rel) if self.thumb_url_fn else thumb_data_uri(self.fm, full_rel)
             cells += f"""<div class="igal-card">
                              <input type="checkbox" class="igal-checkbox" name="delete_targets" value="{_safe(full_rel)}">
                              <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{lb_vals}'><img src="{thumb_url}" loading="lazy" alt="{_safe(name)}"></div>
@@ -2304,7 +2307,12 @@ class ShadowStore:
         else: self._bp(rel_path).write_bytes(f.read_bytes()); self._apply_binary(rel_path); self._bp(rel_path).unlink(missing_ok=True)
         return True
 
-def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str, preview_url: str = "", list_id: str = "shadow-review-list") -> str:
+
+# def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str, preview_url: str = "", list_id: str = "shadow-review-list") -> str:
+
+def shadow_review_html(shadow, accept_url_tpl, reject_url_tpl, diff_url_tpl, list_id="shadow-list", on_open_js: str = "") -> str:
+    """on_open_js, if given, is an arbitrary JS snippet the CALLER supplies (e.g. to open its own panel before showing the diff) - prepended to the diff button's onclick. built_ins never assumes what, if anything, a specific caller wants to happen before a diff renders."""
+    # diff_btn = f'<button class="cm-qbtn" hx-get="{diff_url_tpl.format(path=item.path)}" hx-target="#tessa-bottom-diff" onclick="{on_open_js}">Diff</button>'
     pend = shadow.pending()
     if not pend: return '<div style="color:var(--text_muted);font-size:.8rem;padding:.5rem">No pending changes.</div>'
     rows = ""
