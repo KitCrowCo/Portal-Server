@@ -513,3 +513,33 @@ def cp_theme_switch(theme_mode: str = Form(...), db: Session = Depends(get_db), 
     user.custom_theme = DEFAULT_THEMES[theme_mode]
     db.commit()
     return HTMLResponse("OK")
+
+async def _saved_themes(request) -> dict: return await get_state(request, scope="user", namespace="_theme_saved") or {}
+async def _set_saved_themes(request, data: dict): await set_state(request, data, scope="user", namespace="_theme_saved")
+
+@router.get("/theme/saved_list", response_class=HTMLResponse)
+async def theme_saved_list(request: Request, user=Depends(get_current_user)):
+    saved = await _saved_themes(request)
+    opts = "".join(f'<option value="{UI.escape(name)}">{UI.escape(name)}</option>' for name in saved)
+    return HTMLResponse(f"""<select onchange="if(this.value) htmx.ajax('POST','{_pre}/theme/saved_apply',{{target:'#cp-content',swap:'innerHTML',values:{{name:this.value}}}})" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);width:100%;margin-bottom:0.5rem;">
+                                <option value="">Load a saved theme...</option>{opts}
+                            </select>""")
+
+@router.post("/theme/saved_save", response_class=HTMLResponse)
+async def theme_saved_save(request: Request, name: str = Form(...), user=Depends(get_current_user), db: Session = Depends(get_db)):
+    saved = await _saved_themes(request)
+    saved[name] = dict(getattr(user, "custom_theme", None) or {})
+    await _set_saved_themes(request, saved)
+    return HTMLResponse(f"<span style='color:var(--accent)'>&#x2713; Saved as '{UI.escape(name)}'.</span>")
+
+@router.post("/theme/saved_apply", response_class=HTMLResponse)
+async def theme_saved_apply(request: Request, name: str = Form(...), user=Depends(get_current_user), db: Session = Depends(get_db)):
+    saved = await _saved_themes(request)
+    if name in saved: user.custom_theme = saved[name]; db.commit()
+    return cp_appearance_fragment(db=db, user=user)
+
+@router.delete("/theme/saved/{name}", response_class=HTMLResponse)
+async def theme_saved_delete(name: str, request: Request, user=Depends(get_current_user)):
+    saved = await _saved_themes(request); saved.pop(name, None)
+    await _set_saved_themes(request, saved)
+    return await theme_saved_list(request, user)

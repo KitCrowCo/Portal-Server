@@ -1340,7 +1340,6 @@ class PortalEditor:
             val_payload = f', "view":"{v}"' if self.IM else f"""hx-vals='{{"view":"{v}"}}'"""
             if self.IM: vals = vals.replace('}', f'{val_payload}}}')
             return f"""<button class="ui-btn {"active" if v == view else ""}" style="padding:0.3rem 0.6rem; font-size:0.85rem;" hx-post="{url}" {vals} hx-include="#doc-textarea-{did}" hx-target="#editor-shell-{did}" hx-swap="outerHTML">{label}</button>"""
-
         url_rename, vals_rename = self._get_action_url("rename", did)
         url_search, vals_search = self._get_action_url("search_form", did)
         url_info, vals_info = self._get_action_url("info", did)
@@ -1356,7 +1355,6 @@ class PortalEditor:
         help_btn = f"""<button type="button" class="btn-icon" title="What do these icons do?" onclick="var h=document.getElementById('editor-help-{did}');h.style.display=h.style.display==='none'?'block':'none'">?</button>"""
         download_btn = f"""<button type="button" class="btn-icon" title="Download" onclick="peDownload('{did}','{UI.escape(Path(path).name or (doc.get('title','document') + '.md'))}')">&#x2B07;</button>"""
         print_btn = f"""<button type="button" class="btn-icon" title="Print" onclick="pePrint('{did}')">&#x1F5A8;</button>"""
- 
         return f"""<div class="editor-toolbar">
                        <input id="doc-title-{did}" type="text" value="{UI.escape(doc.get("title",""))}" name="value" hx-post="{url_rename}" {vals_rename} hx-trigger="change" hx-target="#doc-title-{did}" hx-swap="outerHTML" hx-include="this" class="doc-title-input" style="{title_style}" title="{title_hint}">
                        <span id="editor-dirty-{did}" class="editor-dirty-dot" style="display:none" title="Unsaved changes">&#x25CF;</span>
@@ -1685,7 +1683,6 @@ class FileManager:
         self.IM = IM
         self.TM = TM
         self.on_change = on_change or self._default_notify_server # Allow passing custom callback, otherwise default to file_server memory push
-
         if self.IM and self.TM:
             p = self.TM.intent_prefix
             self.IM.scripts[f"{p}_open_file"] = [self._intent_open_file]
@@ -2030,13 +2027,28 @@ class ImageGallery:
 
     def render_shell(self, rel_dir: str = "", include_css: bool = True) -> str:
         style_tag = f"<style>{self.CSS}</style>" if include_css else ""
+        p = self.intent_prefix
+        key_script = f"""<script>(function(){{
+            var grid = document.getElementById('igal-grid-{p}');
+            if (grid && !grid.dataset.igalKeyBound) {{
+                grid.dataset.igalKeyBound = '1';
+                grid.addEventListener('keydown', function(e){{
+                    if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+                    e.preventDefault();
+                    var checked = Array.from(grid.querySelectorAll('input.igal-checkbox:checked')).map(function(c){{return c.value;}});
+                    if (!checked.length) return;
+                    if (!confirm('Delete '+checked.length+' selected item(s)?')) return;
+                    htmx.ajax('POST', '/im/in', {{values: {{type: '{p}_delete', branch: '{p}', lvl: {self.nesting_level}, dir: '{rel_dir}', delete_targets: JSON.stringify(checked)}}, swap: 'none'}});
+                }});
+            }}
+        }})();</script>"""
         return f"""{style_tag}
-                   <div class="igal-shell" id="igal-shell-{self.intent_prefix}">
+                   <div class="igal-shell" id="igal-shell-{p}">
                        {self._crumbs_html(rel_dir)}
-                       <div class="igal-grid" id="igal-grid-{self.intent_prefix}" tabindex="0">{self.grid_html(rel_dir)}</div>
-                       <div id="igal-lightbox-slot-{self.intent_prefix}"></div>
+                       <div class="igal-grid" id="igal-grid-{p}" tabindex="0">{self.grid_html(rel_dir)}</div>
+                       <div id="igal-lightbox-slot-{p}"></div>
                    </div>
-                   <button class="cm-qbtn" style="position:absolute;top:.3rem;right:.3rem;z-index:5;color:#ff4444" onclick="igalDeleteChecked('{self.intent_prefix}')" title="Delete selected">&#x1F5D1;</button>"""
+                   {key_script}"""
 
     def lightbox_html(self, rel_dir: str, index: int) -> str:
         _, files = self._entries(rel_dir)
@@ -2308,27 +2320,24 @@ class ShadowStore:
         return True
 
 
-# def shadow_review_html(shadow: "ShadowStore", accept_url: str, reject_url: str, diff_url: str, preview_url: str = "", list_id: str = "shadow-review-list") -> str:
-
-def shadow_review_html(shadow, accept_url_tpl, reject_url_tpl, diff_url_tpl, list_id="shadow-list", on_open_js: str = "") -> str:
-    """on_open_js, if given, is an arbitrary JS snippet the CALLER supplies (e.g. to open its own panel before showing the diff) - prepended to the diff button's onclick. built_ins never assumes what, if anything, a specific caller wants to happen before a diff renders."""
-    # diff_btn = f'<button class="cm-qbtn" hx-get="{diff_url_tpl.format(path=item.path)}" hx-target="#tessa-bottom-diff" onclick="{on_open_js}">Diff</button>'
+def shadow_review_html(shadow, intent_type: str, extra_vals: dict = None, list_id: str = "shadow-list") -> str:
+    """Every button POSTs /im/in with {type: intent_type, action: accept|reject|diff, path, diff_target, **extra_vals}.
+    Caller registers ONE intent handler that switches on payload['action'] - no per-action routes."""
     pend = shadow.pending()
     if not pend: return '<div style="color:var(--text_muted);font-size:.8rem;padding:.5rem">No pending changes.</div>'
     rows = ""
     for e in pend:
         rp = e["path"]; did = f"shadow-diff-{abs(hash(rp))%99999}"
-        if e.get("kind") == "binary":
-            body = f'<button class="cm-qbtn" hx-get="{preview_url.format(path=rp)}" hx-target="#{did}" hx-swap="innerHTML">Preview</button><span style="font-size:.6rem;color:var(--text_muted);margin-left:.3rem">{e.get("size",0)//1024} KB</span>'
-        else:
-            body = f'<button class="cm-qbtn" hx-get="{diff_url.format(path=rp)}" hx-target="#{did}" hx-swap="innerHTML">Diff</button>'
+        def _vals(action, rp=rp, did=did): return json.dumps({"type": intent_type, "action": action, "path": rp, "diff_target": did, **(extra_vals or {})})
+        diff_btn = "" if e.get("kind")=="binary" else f'<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{_vals("diff")}\'>Diff</button>'
+        size_note = f'<span style="font-size:.6rem;color:var(--text_muted)">{e.get("size",0)//1024} KB</span>' if e.get("kind")=="binary" else ""
         rows += f"""<div class="glass" style="padding:.5rem .7rem;margin-bottom:.3rem">
             <div style="display:flex;align-items:center;gap:.4rem">
                 <span style="flex:1;font-family:var(--font-mono);font-size:.78rem">{rp}</span>
                 <span style="font-size:.65rem;color:var(--text_muted)">{e.get("author","")}</span>
-                {body}
-                <button class="cm-qbtn" style="color:var(--accent)" hx-post="{accept_url.format(path=rp)}" hx-target="#{list_id}" hx-swap="innerHTML">Accept</button>
-                <button class="cm-qbtn" style="color:#ff5f5f" hx-post="{reject_url.format(path=rp)}" hx-target="#{list_id}" hx-swap="innerHTML">Reject</button>
+                {diff_btn}{size_note}
+                <button class="cm-qbtn" style="color:var(--accent)" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("accept")}'>Accept</button>
+                <button class="cm-qbtn" style="color:#ff5f5f" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("reject")}'>Reject</button>
             </div>
             <div id="{did}" style="font-size:.68rem;font-family:var(--font-mono);white-space:pre-wrap;margin-top:.3rem"></div>
         </div>"""
