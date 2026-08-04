@@ -8,20 +8,16 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 connect_args = {}
 if not DATABASE_URL or "sqlite" in DATABASE_URL:
-    # Get the directory part of the path
     db_path = "./data/server.db"
     db_dir = os.path.dirname(db_path)
-    # Create the directory if it doesn't exist
     if not os.path.exists(db_dir): os.makedirs(db_dir)
-#    DATABASE_URL = f"sqlite:///{db_path}"
-
-    DATABASE_URL = "sqlite:///./data/server.db"
+    DATABASE_URL = f"sqlite:///{db_path}"
     connect_args = {"check_same_thread": False}
 elif DATABASE_URL.startswith("postgres://"):
     # Handle "postgres://" vs "postgresql://" for Heroku/various providers
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
-
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_size=20, max_overflow=40, pool_timeout=60)
+    
 # ── SQLite WAL mode ──
 # WAL (Write-Ahead Logging) allows concurrent reads during writes — important when multiple users may be saving state simultaneously.
 # synchronous is intentionally left at its default (FULL under WAL mode).
@@ -40,10 +36,8 @@ Base = declarative_base()
 
 def get_db():
     db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    try: yield db
+    finally: db.close()
 
 # --- --- ---
 # This is a database tool that will likely be moved to tools for a series of database tools that are modularized for all databases
