@@ -157,3 +157,43 @@ details[open] > summary > .tree-caret { transform: rotate(90deg); }
 .tree-cb-partial { background: linear-gradient(135deg, transparent 45%, var(--text_muted) 45%, var(--text_muted) 55%, transparent 55%); }
 
 input[type=file]::file-selector-button {}
+
+
+/* -- Pipeline Builder (generic - PipelineBuilderUI in ai_manager.py) -- */
+.pl-panel { display:flex; flex-direction:column; height:100%; overflow:hidden; }
+.pl-panel-hd { display:flex; align-items:center; gap:.3rem; padding:.3rem .4rem; border-bottom:var(--border-thick) solid var(--border); }
+.pl-panel-title { font-size:.7rem; text-transform:uppercase; letter-spacing:.05em; color:var(--text_muted); flex:1; }
+.pl-list { flex:1; overflow-y:auto; padding:.2rem; }
+.pl-card { padding:.5rem .6rem; margin-bottom:.3rem; font-size:.7rem; }
+.pl-card-hd { display:flex; align-items:center; gap:.3rem; margin-bottom:.3rem; }
+.pl-card-title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; font-weight:600; }
+.pl-status-row { display:flex; align-items:center; gap:.4rem; margin-top:.3rem; }
+.pl-status-label { font-size:.7rem; color:var(--text_muted); }
+.pl-nodes { margin-top:.3rem; font-size:.68rem; color:var(--text_muted); }
+.pl-status-table { width:100%; border-collapse:collapse; margin-top:.2rem; }
+.pl-status-table td { font-size:.6rem; padding:.1rem .3rem; border-bottom:var(--border-thick) solid var(--border); color:var(--text_muted); }
+.pl-slug { font-size:.6rem; color:var(--accent); }
+.pl-preview { max-width:14rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pl-empty { color:var(--text_muted); font-size:.75rem; padding:.5rem; }
+.pl-new-form { display:flex; gap:.3rem; padding:.3rem; }
+.pl-modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; z-index:9000; backdrop-filter:blur(calc(var(--blur)/2)); }
+.pl-modal { width:70rem; max-width:92vw; height:82vh; max-height:82vh; overflow:hidden; display:flex; flex-direction:column; padding:0; }
+.pl-modal-hd { display:flex; align-items:center; padding:.3rem .4rem; border-bottom:var(--border-thick) solid var(--border); flex-shrink:0; gap:.4rem; }
+.pl-modal-body { flex:1; min-height:0; overflow:hidden; display:flex; }
+.pl-node-editor { flex:1; min-width:0; overflow-y:auto; padding:.4rem; }
+.pl-node-list { display:flex; flex-direction:column; gap:.1rem; margin-bottom:.4rem; }
+.pl-node-row { padding:.3rem .5rem; border:var(--border-thick) solid var(--border); border-radius:var(--radius); cursor:pointer; font-size:.7rem; }
+.pl-node-row:hover { border-color:var(--accent); background:var(--accent_dim); }
+.pl-node-form { display:flex; flex-direction:column; gap:.3rem; }
+.pl-form-title { font-weight:600; color:var(--accent); font-size:.8rem; }
+.pl-form-actions { display:flex; gap:.3rem; }
+.pl-check { display:flex; align-items:center; gap:.2rem; font-size:.7rem; padding:.1rem 0; }
+.pl-keyhint { font-size:.6rem; color:var(--accent); }
+.pl-guide { padding:.4rem .6rem; margin-bottom:.3rem; }
+.pl-guide summary { cursor:pointer; font-size:.7rem; color:var(--accent); }
+.pl-placeholder { color:var(--text_muted); font-size:.8rem; text-align:center; padding:2rem; }
+@media (max-width: 46rem) { .pl-modal { width:98vw; height:94vh; } }
+
+/* constrains folder-picker trees so expanding a branch scrolls within itself instead of reflowing the whole modal */
+.folder-picker-root { contain: layout; }
+.folder-picker-root details[open] > summary ~ * { overflow-anchor: none; }
