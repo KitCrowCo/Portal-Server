@@ -2025,7 +2025,7 @@ class ImageGallery:
     """
 
     IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-    
+
     def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None, select_mode=False, on_select=None, full_url_fn=None):
         self.fm = file_manager
         self.IM = IM
@@ -2040,6 +2040,7 @@ class ImageGallery:
             self.IM.scripts[f"{p}_create_folder"] = [self._intent_create_folder]
             self.IM.scripts[f"{p}_rename"] = [self._intent_rename]
             register_key_role(self.intent_prefix, self._im_key)
+            register_key_role(f"{self.intent_prefix}_lb", self._im_lb_key)
             ensure_key_dispatch(self.IM)
             if self.select_mode and self.on_select: self.IM.scripts[f"{p}_pick"] = [self.on_select]
             else:
@@ -2049,7 +2050,7 @@ class ImageGallery:
                 self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
                 self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
                 self.IM.scripts[f"{p}_key"] = [self._im_key]
-        
+
     def _data_uri(self, rel: str) -> str:
         """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
         try:
@@ -2058,7 +2059,7 @@ class ImageGallery:
             return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
         except Exception:
             return ""
-        
+
     def _entries(self, rel_dir: str, limit: int = None):
         root = self.fm.resolve(rel_dir)
         dirs, files = [], []
@@ -2090,11 +2091,27 @@ class ImageGallery:
         prev_btn = f"""<button class="igal-lb-nav prev" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index-1)%len(files))}'>&#x2039;</button>""" if len(files) > 1 else ""
         next_btn = f"""<button class="igal-lb-nav next" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index+1)%len(files))}'>&#x203A;</button>""" if len(files) > 1 else ""
         img_src = self.full_url_fn(full_rel) if self.full_url_fn else self._data_uri(full_rel)
-        return f"""<div class="igal-lightbox" onclick="if(event.target===this) this.innerHTML=''">
+        return f"""<div class="igal-lightbox" tabindex="-1" data-im-role="{p}_lb" data-im-keys="ArrowLeft ArrowRight Escape" data-im-scope="{_safe(rel_dir)}|{index}" onclick="if(event.target===this) this.innerHTML=''">
                        <div class="igal-lb-top"><span>{UI.escape(name)} &middot; {index+1}/{len(files)}</span><span style="cursor:pointer" onclick="document.getElementById('igal-lightbox-slot-{p}').innerHTML=''">&#x2715;</span></div>
                        <div class="igal-lb-body">{prev_btn}<img id="igal-lb-img-{p}" src="{img_src}" onwheel="event.preventDefault(); var s=(this.dataset.z||1)*1+(event.deltaY<0?.15:-.15); s=Math.max(1,Math.min(s,4)); this.dataset.z=s; this.style.transform='scale('+s+')'">{next_btn}</div>
                        <div class="igal-lb-bottom"><button class="cm-qbtn" onclick="document.getElementById('igal-lb-img-{p}').dataset.z=1;document.getElementById('igal-lb-img-{p}').style.transform='scale(1)'">Reset zoom</button></div>
                    </div>"""
+
+    async def _im_lightbox(self, request, payload, imr):
+        rel_dir, index = payload.get("dir", ""), int(payload.get("index", 0))
+        imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}">{self.lightbox_html(rel_dir, index)}</div><script>var el=document.querySelector("[data-im-role={self.intent_prefix}_lb]");if(el)el.focus();</script>')
+        return imr
+
+    async def _im_lb_key(self, request, payload, imr):
+        key = payload.get("key", "")
+        scope = payload.get("element_scope", "")
+        rel_dir, _, idx = scope.rpartition("|")
+        index = int(idx or 0)
+        if key == "Escape": return imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}"></div>')
+        _, files, _ = self._entries(rel_dir)
+        if not files: return imr
+        new_index = (index - 1) % len(files) if key == "ArrowLeft" else (index + 1) % len(files) if key == "ArrowRight" else index
+        return await self._im_lightbox(request, {"dir": rel_dir, "index": new_index}, imr)
 
     async def _im_browse(self, request, payload, imr):
         rel_dir = payload.get("dir", "")
@@ -2136,12 +2153,6 @@ class ImageGallery:
             cells += f"""<div style="grid-column:1/-1;text-align:center;padding:.8rem"><button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{more_vals}'>Load more ({total-limit} remaining)</button></div>"""
         if not cells: cells = """<div style="grid-column:1/-1;color:var(--text_muted);padding:1rem;font-size:.7rem">Empty folder.</div>"""
         return cells
-
-    
-    async def _im_lightbox(self, request, payload, imr):
-        rel_dir, index = payload.get("dir", ""), int(payload.get("index", 0))
-        imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}">{self.lightbox_html(rel_dir, index)}</div>')
-        return imr
 
     async def _intent_create_folder(self, request, payload, imr):
         rel_dir = payload.get("dir", "")
@@ -2205,42 +2216,6 @@ class ImageGallery:
                        </div>"""
         return f"""<div class="igal-crumbs" id="igal-crumbs-{p}">{"".join(crumbs)}<span id="igal-action-msg" style="font-size:.7rem;margin-left:.4rem"></span>{controls}</div>"""
 
-    def notgrid_html(self, rel_dir: str) -> str:
-        dirs, files = self._entries(rel_dir)
-        p = self.intent_prefix
-        cells = ""
-        for full_rel, name in dirs:
-            browse_vals = json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": full_rel})
-            rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
-            cells += f"""<div class="igal-folder-wrap"><div class="igal-folder" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{browse_vals}'><span style="font-size:1.8rem">&#x1F4C1;</span><span style="font-size:.7rem;text-align:center;padding:0 .3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90%">{_safe(name)}</span></div><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename folder to:" title="Rename folder">&#x270E;</button></div>"""
-        for i, (full_rel, name, _mtime) in enumerate(files):
-            thumb_url = self.thumb_url_fn(full_rel) if self.thumb_url_fn else thumb_data_uri(self.fm, full_rel)
-            if self.select_mode:
-                pick_vals = json.dumps({"type": f"{p}_pick", "branch": p, "lvl": self.nesting_level, "path": full_rel})
-                cells += f"""<div class="igal-card">
-                                 <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{pick_vals}'><img src="{thumb_url}" loading="lazy" alt="{_safe(name)}"></div>
-                                 <div class="igal-card-footer"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span></div>
-                             </div>"""
-                continue
-            lb_vals = json.dumps({"type": f"{p}_lightbox", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "index": i})
-            meta_vals = json.dumps({"type": f"{p}_meta", "branch": p, "lvl": self.nesting_level, "path": full_rel})
-            rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
-            thumb_url = self.thumb_url_fn(full_rel) if self.thumb_url_fn else thumb_data_uri(self.fm, full_rel)
-            full_url = self.full_url_fn(full_rel) if self.full_url_fn else self._data_uri(full_rel)
-            cells += f"""<div class="igal-card">
-                             <input type="checkbox" class="igal-checkbox" name="delete_targets" value="{_safe(full_rel)}">
-                             <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{lb_vals}'><img src="{thumb_url}" loading="lazy" alt="{_safe(name)}"></div>
-                             <div class="igal-card-footer">
-                                 <span title="{_safe(name)}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span>
-                                 <a class="igal-item-btn" href="{full_url}" download="{_safe(name)}" title="Download">&#x2B07;</a>
-                                 <button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{meta_vals}' title="Info">&#x2139;</button>
-                                 <button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename to:" title="Rename">&#x270E;</button>
-                             </div>
-                         </div>"""
-        if not cells: cells = """<div style="grid-column:1/-1;color:var(--text_muted);padding:1rem;font-size:.7rem">Empty folder.</div>"""
-        return cells
-
-    
     def _move_modal_html(self, rel_dir: str, count: int) -> str:
         p = self.intent_prefix
         body = f"""<div style="font-size:.75rem;color:var(--text_muted);margin-bottom:.5rem">Move {count} item(s) to:</div>
@@ -2280,8 +2255,8 @@ class ImageGallery:
             if not targets: return imr
             self.fm.batch_delete(targets)
             return await self._im_browse(request, {"dir": rel_dir}, imr)
-        return imr    
-    
+        return imr
+
 def _safe(s: str) -> str: return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 class ShadowStore:
