@@ -197,3 +197,10 @@ input[type=file]::file-selector-button {}
 /* constrains folder-picker trees so expanding a branch scrolls within itself instead of reflowing the whole modal */
 .folder-picker-root { contain: layout; }
 .folder-picker-root details[open] > summary ~ * { overflow-anchor: none; }
+
+.pl-graph{display:flex;flex-direction:column;gap:.5rem;padding:.5rem}
+.graph-row{display:flex;align-items:center;gap:.5rem}
+.graph-row-lbl{width:1.5rem;flex-shrink:0;text-align:right;color:var(--text_muted);font-size:.7rem;font-family:var(--font-mono)}
+.graph-node{background:var(--glass);border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.4rem .6rem;cursor:pointer;display:flex;flex-direction:column;gap:.1rem;font-size:.7rem;min-width:8rem}
+.graph-node:hover{border-color:var(--accent)}
+.status-badge{font-size:.6rem;padding:.05rem .3rem;border-radius:.3rem;background:var(--accent_dim);color:var(--accent);border:1px solid var(--accent)33}

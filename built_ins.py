@@ -1986,8 +1986,8 @@ function igalMoveConfirm(prefix, dir, lvl) {
     if (!targets.length) return;
     htmx.ajax('POST', '/im/in', {values: {type: prefix+'_move', branch: prefix, lvl: lvl, dir: dir, name: dest, delete_targets: JSON.stringify(targets)}, swap: 'none'});
 }
-"""  
-    
+"""
+
 class ImageGallery:
     """
     General-purpose folder-aware image browser + lightbox. Root-isolated via FileManager, so it's safe to point at any output directory.
@@ -2026,7 +2026,7 @@ class ImageGallery:
 
     IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
-    def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None, select_mode=False, on_select=None, full_url_fn=None):
+    def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None, select_mode=False, on_select=None, full_url_fn=None, transfer_targets: dict = None):
         self.fm = file_manager
         self.IM = IM
         self.intent_prefix = intent_prefix
@@ -2034,6 +2034,7 @@ class ImageGallery:
         self.select_mode = select_mode
         self.on_select = on_select
         self.full_url_fn = full_url_fn  # callable(rel_path)->url for the single lightbox/download image; None falls back to inline base64
+        self.transfer_targets = transfer_targets or {}
         if self.IM:
             p = self.intent_prefix
             self.IM.scripts[f"{p}_browse"] = [self._im_browse]
@@ -2042,7 +2043,8 @@ class ImageGallery:
             register_key_role(self.intent_prefix, self._im_key)
             register_key_role(f"{self.intent_prefix}_lb", self._im_lb_key)
             ensure_key_dispatch(self.IM)
-            if self.select_mode and self.on_select: self.IM.scripts[f"{p}_pick"] = [self.on_select]
+            if self.select_mode and self.on_select:
+                self.IM.scripts[f"{p}_pick"] = [self.on_select]
             else:
                 self.IM.scripts[f"{p}_lightbox"] = [self._im_lightbox]
                 self.IM.scripts[f"{p}_move"] = [self._intent_move]
@@ -2050,6 +2052,7 @@ class ImageGallery:
                 self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
                 self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
                 self.IM.scripts[f"{p}_key"] = [self._im_key]
+            if self.transfer_targets and not self.select_mode: self.IM.scripts[f"{p}_transfer"] = [self._intent_transfer]
 
     def _data_uri(self, rel: str) -> str:
         """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
@@ -2091,7 +2094,7 @@ class ImageGallery:
         prev_btn = f"""<button class="igal-lb-nav prev" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index-1)%len(files))}'>&#x2039;</button>""" if len(files) > 1 else ""
         next_btn = f"""<button class="igal-lb-nav next" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index+1)%len(files))}'>&#x203A;</button>""" if len(files) > 1 else ""
         img_src = self.full_url_fn(full_rel) if self.full_url_fn else self._data_uri(full_rel)
-        return f"""<div class="igal-lightbox" tabindex="-1" data-im-role="{p}_lb" data-im-keys="ArrowLeft ArrowRight Escape" data-im-scope="{_safe(rel_dir)}|{index}" onclick="if(event.target===this) this.innerHTML=''">
+        return f"""<div class="igal-lightbox" tabindex="-1" data-im-role="{p}_lb" data-im-keys="ArrowLeft ArrowRight Delete Backspace Escape" data-im-scope="{_safe(rel_dir)}|{index}" onclick="if(event.target===this) this.innerHTML=''">
                        <div class="igal-lb-top"><span>{UI.escape(name)} &middot; {index+1}/{len(files)}</span><span style="cursor:pointer" onclick="document.getElementById('igal-lightbox-slot-{p}').innerHTML=''">&#x2715;</span></div>
                        <div class="igal-lb-body">{prev_btn}<img id="igal-lb-img-{p}" src="{img_src}" onwheel="event.preventDefault(); var s=(this.dataset.z||1)*1+(event.deltaY<0?.15:-.15); s=Math.max(1,Math.min(s,4)); this.dataset.z=s; this.style.transform='scale('+s+')'">{next_btn}</div>
                        <div class="igal-lb-bottom"><button class="cm-qbtn" onclick="document.getElementById('igal-lb-img-{p}').dataset.z=1;document.getElementById('igal-lb-img-{p}').style.transform='scale(1)'">Reset zoom</button></div>
@@ -2099,19 +2102,8 @@ class ImageGallery:
 
     async def _im_lightbox(self, request, payload, imr):
         rel_dir, index = payload.get("dir", ""), int(payload.get("index", 0))
-        imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}">{self.lightbox_html(rel_dir, index)}</div><script>var el=document.querySelector("[data-im-role={self.intent_prefix}_lb]");if(el)el.focus();</script>')
+        imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}">{self.lightbox_html(rel_dir, index)}<script>var el=document.querySelector("[data-im-role={self.intent_prefix}_lb]");if(el)el.focus();</script></div>')
         return imr
-
-    async def _im_lb_key(self, request, payload, imr):
-        key = payload.get("key", "")
-        scope = payload.get("element_scope", "")
-        rel_dir, _, idx = scope.rpartition("|")
-        index = int(idx or 0)
-        if key == "Escape": return imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}"></div>')
-        _, files, _ = self._entries(rel_dir)
-        if not files: return imr
-        new_index = (index - 1) % len(files) if key == "ArrowLeft" else (index + 1) % len(files) if key == "ArrowRight" else index
-        return await self._im_lightbox(request, {"dir": rel_dir, "index": new_index}, imr)
 
     async def _im_browse(self, request, payload, imr):
         rel_dir = payload.get("dir", "")
@@ -2201,6 +2193,17 @@ class ImageGallery:
             imr.oob(f'<div class="glass" style="padding:.5rem;font-size:.7rem;color:#ff5f5f">{_safe(str(e)[:80])}</div>', f"igal-lightbox-slot-{self.intent_prefix}")
         return imr
 
+    async def _intent_transfer(self, request, payload, imr):
+        rel, dest_key = payload.get("path", ""), payload.get("dest", "")
+        dest_root = self.transfer_targets.get(dest_key)
+        if not dest_root: return imr
+        try:
+            FileManager(Path(dest_root)).write_bytes(Path(rel).name, self.fm.resolve(rel).read_bytes())
+            imr.oob(f'<span style="color:var(--accent);font-size:.7rem">&#x2713; Copied to {_safe(dest_key)}</span>', "igal-action-msg")
+        except Exception as e:
+            imr.oob(f'<span style="color:#ff5f5f;font-size:.7rem">&#x26A0; {_safe(str(e)[:60])}</span>', "igal-action-msg")
+        return imr
+
     def _crumbs_html(self, rel_dir: str) -> str:
         parts = [p for p in rel_dir.split("/") if p]
         p = self.intent_prefix
@@ -2247,6 +2250,7 @@ class ImageGallery:
         if targets: self.fm.batch_delete(targets)
         return await self._im_browse(request, payload, imr)
 
+    # IS THIS USED????
     async def _im_key(self, request, payload, imr):
         key = payload.get("key", "")
         rel_dir = payload.get("element_scope", "")
@@ -2256,6 +2260,24 @@ class ImageGallery:
             self.fm.batch_delete(targets)
             return await self._im_browse(request, {"dir": rel_dir}, imr)
         return imr
+
+    async def _im_lb_key(self, request, payload, imr):
+        key = payload.get("key", "")
+        scope = payload.get("element_scope", "")
+        rel_dir, _, idx = scope.rpartition("|")
+        index = int(idx or 0)
+        if key == "Escape": return imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}"></div>')
+        _, files, _ = self._entries(rel_dir)
+        if not files: return imr
+        if key in ("Delete", "Backspace"):
+            full_rel, _, _ = files[index]
+            self.fm.delete(full_rel)
+            imr.oob(self.grid_html(rel_dir), f"igal-grid-{self.intent_prefix}")
+            _, files, _ = self._entries(rel_dir)
+            if not files: return imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}"></div>')
+            return await self._im_lightbox(request, {"dir": rel_dir, "index": min(index, len(files)-1)}, imr)
+        new_index = (index - 1) % len(files) if key == "ArrowLeft" else (index + 1) % len(files) if key == "ArrowRight" else index
+        return await self._im_lightbox(request, {"dir": rel_dir, "index": new_index}, imr)
 
 def _safe(s: str) -> str: return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
