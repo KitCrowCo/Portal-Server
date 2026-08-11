@@ -702,7 +702,7 @@ async def _intent_toggle_toolbar(request, payload, imr):
 
 async def tab_bar_from_state(state: dict, tab_bar_id: str, intent_prefix: str = "", nesting_level = 1, allow_new: bool = True, closable: bool = True) -> str:
     ordered = sorted(state.get("tabs", {}).values(), key=lambda t: t.get("order", 0))
-    tabs_html = "".join(UI.tab(t.get("label","tab") , t.get("id", t.get("order", 0)), active = (t.get("id", t.get("order", 0)) == state.get("active")), icon = t.get("icon", ""), tooltip = t.get("path", ""), data_reorder_type=f"{intent_prefix}_reorder", data_branch=intent_prefix, data_lvl=nesting_level, on_close = ({"post":"/im/in", "swap":"none", "target":"body", "vals": json.dumps({"type": f"{intent_prefix}_close_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})} if closable else None), htmx = {"post":"/im/in", "swap": "none", "target":"body","vals": json.dumps({"type": f"{intent_prefix}_focus_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})}) for t in ordered)
+    tabs_html = "".join(UI.tab(t.get("label","tab"), t.get("id", t.get("order", 0)), active = (t.get("id", t.get("order", 0)) == state.get("active")), icon = t.get("icon", ""), tooltip = t.get("path", ""), back_attrs = ({"post":"/im/in","swap":"none","target":"body","vals":json.dumps({"type": f"{intent_prefix}_back","lvl": nesting_level,"branch": intent_prefix,"id": t.get("id", t.get("order", 0))})} if t.get("history") else None), data_reorder_type=f"{intent_prefix}_reorder", data_branch=intent_prefix, data_lvl=nesting_level, on_close = ({"post":"/im/in", "swap":"none", "target":"body", "vals": json.dumps({"type": f"{intent_prefix}_close_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})} if closable else None), htmx = {"post":"/im/in", "swap": "none", "target":"body","vals": json.dumps({"type": f"{intent_prefix}_focus_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})}) for t in ordered)
     add_btn = {"post":"/im/in", "target":"body", "vals":json.dumps({"type": f"{intent_prefix}_open_tab", "lvl": nesting_level, "branch": intent_prefix}), "swap":"none"} if allow_new else None
     return UI.tab_bar(content = tabs_html, id = tab_bar_id, add_btn = add_btn, nesting_level = nesting_level)
 
@@ -815,7 +815,10 @@ class TabManager:
             existing = next((k for k, v in state["tabs"].items() if v.get("path") == base_tab["path"]), None)
             if existing: tab_id, base_tab["id"] = existing, existing
         if tab_id not in state["tabs"]: state["tabs"][tab_id] = base_tab
-        else: state["tabs"][tab_id].update(base_tab)
+        else:
+            old_path = state["tabs"][tab_id].get("path")
+            if old_path and base_tab.get("path") and old_path != base_tab["path"]: self.push_history(state["tabs"][tab_id], old_path)
+            state["tabs"][tab_id].update(base_tab)
         for k, v in payload.items():
             if k not in ("id", "label", "icon", "order") and k not in self._ROUTING_KEYS: state["tabs"][tab_id][k] = v
         state["active"] = tab_id

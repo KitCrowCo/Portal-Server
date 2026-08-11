@@ -223,8 +223,10 @@ class UI:
         data_attrs = " ".join(f'data-{k[5:]}="{v}"' for k, v in kwargs.items() if k.startswith("data_") and v)
         close_click = UI.htmx_html(kwargs["on_close"]) if kwargs.get("on_close") else kwargs.get("close_attrs", None)
         close = f"""<span class="close-btn" onclick="event.stopPropagation()" {close_click}>&#x2715;</span>""" if close_click else ""
+        back_click = UI.htmx_html(kwargs["back_attrs"]) if kwargs.get("back_attrs") else ""
+        back_btn = f"""<span class="tab-back-btn" onclick="event.stopPropagation()" {back_click} title="Back">&#x2190;</span>""" if back_click else ""
         draggable = ' draggable="true" ondragstart="tabDragStart(event)" ondragover="event.preventDefault()" ondrop="tabDrop(event)"' if tab_id else ""
-        return f"""<div {id_attr} class="{"tab active" if active else "tab"}" data-tab-id="{tab_id or ""}" {data_attrs} {UI.htmx_html(kwargs.get("htmx")) if "htmx" in kwargs.keys() else kwargs.get("focus_attrs", "")} {title_attr}{draggable} style="cursor:pointer;">{icon if icon else ""}{label}{close}</div>"""
+        return f"""<div {id_attr} class="{"tab active" if active else "tab"}" data-tab-id="{tab_id or ""}" {data_attrs} {UI.htmx_html(kwargs.get("htmx")) if "htmx" in kwargs.keys() else kwargs.get("focus_attrs", "")} {title_attr}{draggable} style="cursor:pointer;">{icon if icon else ""}{back_btn}{label}{close}</div>"""
 
     @staticmethod
     def tab_bar(content="", id="tab-bar", **kwargs):
