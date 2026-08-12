@@ -1848,7 +1848,7 @@ class FileManager:
         if saved: self._trigger_change(saved, "created")
         return saved
 
-    def new_item_modal_html(self, modal_id: str, create_url: str, parent: str = "", target_id: str = "body", swap: str = "none", filter_fn=None) -> str: return new_item_modal_html(modal_id, create_url, self.folder_picker_html(parent, filter_fn), target_id, swap)
+    def new_item_modal_html(self, modal_id: str, create_url: str = "", parent: str = "", target_id: str = "body", swap: str = "none", filter_fn=None, intent_type: str = "", branch: str = "", lvl: int = 1) -> str: return new_item_modal_html(modal_id, create_url, self.folder_picker_html(parent, filter_fn), target_id, swap, intent_type=intent_type, branch=branch, lvl=lvl)
     def move_modal_html(self, modal_id: str, move_url: str, item_path: str, target_id: str = "body", swap: str = "none", filter_fn=None) -> str: return move_modal_html(modal_id, move_url, self.folder_picker_html(filter_fn=filter_fn), item_path, target_id, swap)
 
     async def _intent_open_file(self, request, payload: dict, imr):
@@ -1884,10 +1884,13 @@ class FileManager:
 
 def _modal_target(target_id: str) -> str: return target_id if target_id == "body" else f"#{target_id}"
 
-def new_item_modal_html(modal_id: str, create_url: str, picker_html: str, target_id: str = "body", swap: str = "none", allow_upload: bool = True) -> str:
-    """File / Folder / Upload(file or folder) creation modal. Folder upload uses webkitdirectory + a hidden JSON array of each file's webkitRelativePath, computed on file-input change (not at submit time, to avoid relying on cross-listener event ordering with htmx's own submit handler)."""
+def new_item_modal_html(modal_id: str, create_url: str = "", picker_html: str = "", target_id: str = "body", swap: str = "none", allow_upload: bool = True, intent_type: str = "", branch: str = "", lvl: int = 1) -> str:
+    """create_url (legacy plain-route target) and intent_type (routes through /im/in) are mutually exclusive - pass intent_type for new callers; create_url stays supported for anything not yet migrated to intents."""
+    post_target = "/im/in" if intent_type else create_url
+    hidden_intent = f'<input type="hidden" name="type" value="{intent_type}"><input type="hidden" name="branch" value="{branch}"><input type="hidden" name="lvl" value="{lvl}">' if intent_type else ""
     upload_radios = f"""<label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem"><input type="radio" name="kind" value="upload" onchange="nimShowUpload('{modal_id}',false)"> Upload file(s)</label><label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem"><input type="radio" name="kind" value="upload_folder" onchange="nimShowUpload('{modal_id}',true)"> Upload folder</label>""" if allow_upload else ""
-    body = f"""<form id="nim-form-{modal_id}" hx-post="{create_url}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" hx-encoding="multipart/form-data" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex;flex-direction:column;gap:.6rem">
+    body = f"""<form id="nim-form-{modal_id}" hx-post="{post_target}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" hx-encoding="multipart/form-data" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex;flex-direction:column;gap:.6rem">
+                    {hidden_intent}
                     <div id="nim-name-{modal_id}">
                         <label style="font-size:.75rem;color:var(--text_muted)">Name<input type="text" name="name" class="module-select" placeholder="page.md or folder-name" style="width:100%"></label>
                     </div>
