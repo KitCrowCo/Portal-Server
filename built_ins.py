@@ -12,6 +12,11 @@ from .state import get_state, set_state, clear_state, clear_session
 from .interface_manager import push_update
 from .file_server import notify_manual_mutation
 from PIL import Image as _PILImageThumb
+import openpyxl
+
+# Should this remain a try or be a core requirment. (depends on how heavy it is for small systems vs how expandable useful it is)
+try: import pypdf
+except ImportError: pypdf = None
 
 # Three processing depths, selected via the `mode` argument:
 #   "standard"   - CommonMark-compatible subset only. Safe for untrusted input.
@@ -101,8 +106,7 @@ clean_mojibake = clean_text  # backward-compat alias
 _FS_UNSAFE = re.compile(r'[\x00-\x1f<>:"/\\|?*\x7f]')
 
 def sanitize_filename(name: str, default: str = "untitled") -> str:
-    """Strips characters unsafe across Windows/Linux filesystems and URL query strings, collapses whitespace,
-    preserves the extension. Not ASCII-only - non-Latin names pass through untouched."""
+    """Strips characters unsafe across Windows/Linux filesystems and URL query strings, collapses whitespace, preserves the extension. Not ASCII-only - non-Latin names pass through untouched."""
     name = clean_text(name).strip()
     stem, ext = (name.rpartition(".")[0], name.rpartition(".")[2]) if "." in name[1:] else (name, "")
     stem = _FS_UNSAFE.sub("_", stem).strip(" .") or default
@@ -683,6 +687,26 @@ def html_to_md(html: str, mode: str = "extended", **kwargs) -> str:
 
     return t.strip()
 
+def extract_file_text(path: Path, max_excel_rows: int = 500) -> str:
+    """Best-effort plain-text extraction for common document formats - shared by any caller that needs a file turned into LLM-readable text (chat attachments, knowledge ingestion, etc.).
+    Images are not handled here; they go to vision-capable models as image data, not text. Returns an inline bracketed note on failure rather than raising, so a caller processing several files doesn't lose the rest to one bad file."""
+    ext = path.suffix.lower()
+    try:
+        if ext in (".txt", ".md", ".csv"): return path.read_text(encoding="utf-8", errors="ignore")
+        if ext in (".xlsx", ".xls"):
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            rows = []
+            for ws in wb.worksheets:
+                rows.append(f"Sheet: {ws.title}")
+                for row in ws.iter_rows(values_only=True, max_row=max_excel_rows): rows.append(",".join(str(c or "") for c in row))
+            return "\n".join(rows)
+        if ext == ".pdf":
+            if not pypdf: return "[PDF extraction unavailable - pypdf not installed]"
+            reader = pypdf.PdfReader(str(path))
+            return "\n\n".join(pg.extract_text() or "" for pg in reader.pages)
+    except Exception as e: return f"[extraction error: {e}]"
+    return ""
+
 # --- Toolbar Toggle ---
 
 async def _intent_toggle_toolbar(request, payload, imr):
@@ -936,6 +960,17 @@ CHAT_CSS = """
 """
 
 CHAT_SCRIPT = """
+function cmCopyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).catch(function(){ cmCopyFallback(text); }); }
+    else cmCopyFallback(text);
+}
+function cmCopyFallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    try { document.execCommand('copy'); } catch(e) {}
+    document.body.removeChild(ta);
+}
 (function(){
     // Auto-resize input and estimate tokens
     document.addEventListener('input', function(e){
@@ -1017,6 +1052,7 @@ class ChatManager:
         self.show_attach = kwargs.get('show_attach', False)
         self.show_pipeline = kwargs.get('show_pipeline', False)
         self.intent_prefix = kwargs.get('intent_prefix', "")
+        self.action_intent_prefix = kwargs.get('action_intent_prefix', "")
         self.inrows = kwargs.get('inrows', 2)
         self.wordwrap = kwargs.get('wordwrap', True)
         self.bubble_margin = kwargs.get('bubble_margin', 8)
@@ -1037,11 +1073,11 @@ class ChatManager:
     @property
     def CSS(self): return (CHAT_CSS + f""".cm-me .cm-bubble{{background:{self.bubble_me_bg};border-color:{self.bubble_me_border};}}.cm-other .cm-bubble{{background:{self.bubble_other_bg};border-color:{self.bubble_other_border};}}""")
 
-    def shell(self, sid, messages=None, user=None, header_html="", extra_footer="", sprites=None, viewer_name="", room_owner="", is_working=False, partial_content="", partial_thinking="", stop_url=""):
+    def shell(self, sid, messages=None, user=None, header_html="", extra_footer="", sprites=None, viewer_name="", room_owner="", is_working=False, partial_content="", partial_thinking="", stop_url="", owns_conversation=False):
         style_cls = f"cm-s-{self.view_style}"
         no_in_cls = " cm-no-input" if not self.input_enabled else ""
         vname = viewer_name or (user.username if user else "")
-        msgs_html = self.render_messages(messages, vname, user, sprites, room_owner) if messages is not None else '<div class="cm-empty">No messages yet.</div>'
+        msgs_html = self.render_messages(messages, vname, user, sprites, room_owner, owns_conversation) if messages is not None else '<div class="cm-empty">No messages yet.</div>'
         hdr = f'<div class="cm-header">{header_html}</div>' if header_html else ""
         footer = self._footer_html(sid, extra_footer) if self.input_enabled or extra_footer else ""
         if is_working: work_html = self.working_html(sid, stop_url).replace(' hx-swap-oob="outerHTML"', '')
@@ -1050,7 +1086,7 @@ class ChatManager:
         else: stream_html = f'<div id="cm-stream-{sid}" class="cm-stream"></div>'
         return f"""<div class="cm-shell {style_cls}{no_in_cls}" data-max-in="{self.input_max_pct}"><div class="cm-shell-inner">{hdr}<div id="cm-msgs-{sid}" class="cm-msgs" data-pinned="true">{msgs_html}</div>{stream_html}{work_html}{footer}</div></div>"""
 
-    def render_messages(self, messages, viewer_name="", user=None, sprites=None, room_owner=""):
+    def render_messages(self, messages, viewer_name="", user=None, sprites=None, room_owner="", owns_conversation=False):
         if not messages: return '<div class="cm-empty">No messages yet.</div>'
         sprites = sprites or {}; vname = viewer_name or (user.username if user else "")
         role_u = getattr(user, "role", "user") if user else "user"
@@ -1059,7 +1095,7 @@ class ChatManager:
             if m.get("deleted"): continue
             uname = m.get("user_name","") or m.get("persona_name","")
             is_me = (uname == vname) if uname else (m.get("role") == "user" and bool(vname))
-            can_del = is_me or room_owner == vname or role_u in ("admin","moderator")
+            can_del = is_me or room_owner == vname or role_u in ("admin","moderator") or owns_conversation
             out += self.render_message(m, is_me=is_me, can_edit=is_me, can_delete=can_del, sprites=sprites)
         return out or '<div class="cm-empty">No messages.</div>'
 
@@ -1083,8 +1119,18 @@ class ChatManager:
         bubble = f'<div class="cm-bubble" id="cm-bubble-{mid}" data-raw="{UI.escape(content_raw)}">{meta}<div class="cm-content">{content}</div>{think_html}</div>' # data-raw stores original markdown for copy
         acts = []
         if self.allow_copy and mid: acts.append(f"""<button class="cm-act" onclick="cmCopyText(document.getElementById('cm-bubble-{mid}').dataset.raw||'')" title="Copy markdown">&#x2398;</button>""")
-        if can_edit and self.allow_edit and mid and self.base_url: acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>')
-        if can_delete and self.allow_delete and mid and self.base_url: acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
+        if can_edit and self.allow_edit and mid:
+            if self.action_intent_prefix:
+                acts.append(f'<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{{"type":"{self.action_intent_prefix}_msg_edit_form","id":"{mid}","lvl":{self.nesting_level}}}\' title="Edit">&#x270E;</button>')
+            elif self.base_url:
+                acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>')
+        if can_delete and self.allow_delete and mid:
+            if self.action_intent_prefix:
+                acts.append(f'<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{{"type":"{self.action_intent_prefix}_msg_delete","id":"{mid}","lvl":{self.nesting_level}}}\' hx-confirm="Delete?" title="Delete">&#x2715;</button>')
+            elif self.base_url:
+                acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
+        # if can_edit and self.allow_edit and mid and self.base_url: acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>')
+        # if can_delete and self.allow_delete and mid and self.base_url: acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
         acts_html = f'<div class="cm-acts-side">{"".join(acts)}</div>' if acts else ""
         bwrap = f'<div class="cm-bwrap">{bubble}</div>'
         if role == "system": return f'<div class="cm-msg cm-sys cm-full" id="cm-msg-{mid}" data-msg-id="{mid}">{bwrap}</div>'
@@ -1246,17 +1292,6 @@ function pePrint(did) {
 window.addEventListener('beforeunload', function(e) {
     if (document.querySelector('.editor-dirty-dot[style*="inline"]')) { e.preventDefault(); e.returnValue = ''; }
 });
-function cmCopyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).catch(function(){ cmCopyFallback(text); }); }
-    else cmCopyFallback(text);
-}
-function cmCopyFallback(text) {
-    var ta = document.createElement('textarea');
-    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta); ta.focus(); ta.select();
-    try { document.execCommand('copy'); } catch(e) {}
-    document.body.removeChild(ta);
-}
 """ + MD_LIVE_OVERLAY_JS + MD_LIVE_EDIT_INIT_JS
 
 class PortalEditor:
@@ -1626,8 +1661,10 @@ class SettingsGroup:
                     data[f.name] = int(v) if f.step == 1 else v
                 except Exception: data[f.name] = f.default
             elif f.type == "json":
-                try: data[f.name] = json.loads(raw) if raw.strip() else {}
-                except: data[f.name] = f.default or {}
+                if isinstance(raw, (dict, list)): data[f.name] = raw
+                else:
+                    try: data[f.name] = json.loads(raw) if raw and raw.strip() else f.default
+                    except Exception: data[f.name] = f.default or {}
             else:
                 data[f.name] = raw if raw is not None else f.default
         with open(self.json_path, 'w', encoding='utf-8') as f:
