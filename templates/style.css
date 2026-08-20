@@ -223,3 +223,7 @@ input[type=file]::file-selector-button {}
 .status-table { table-layout:fixed; }
 .status-table td { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .status-table td:first-child { width:26%; } .status-table td:nth-child(2) { width:16%; } .status-table td:nth-child(3) { width:14%; } .status-table td.status-preview { width:44%; }
+
+.htmx-request.spin, .htmx-request .spin { animation: spin 0.8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+button.htmx-request { opacity: .6; pointer-events: none; }
