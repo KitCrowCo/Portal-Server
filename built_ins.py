@@ -961,8 +961,17 @@ CHAT_CSS = """
 
 CHAT_SCRIPT = """
 function cmCopyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).catch(function(){ cmCopyFallback(text); }); }
-    else cmCopyFallback(text);
+    var done = function(){ cmToast('Copied'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done).catch(function(){ cmCopyFallback(text); done(); }); }
+    else { cmCopyFallback(text); done(); }
+}
+function cmToast(msg) {
+    var t = document.createElement('div');
+    t.textContent = msg;
+    t.style.cssText = 'position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);background:var(--accent_dim);color:var(--accent);border:var(--border-thick) solid var(--accent);padding:.4rem .9rem;border-radius:var(--radius);font-size:.8rem;z-index:99999;opacity:0;transition:opacity .15s';
+    document.body.appendChild(t);
+    requestAnimationFrame(function(){ t.style.opacity='1'; });
+    setTimeout(function(){ t.style.opacity='0'; setTimeout(function(){ t.remove(); }, 200); }, 1400);
 }
 function cmCopyFallback(text) {
     var ta = document.createElement('textarea');
@@ -1073,14 +1082,14 @@ class ChatManager:
     @property
     def CSS(self): return (CHAT_CSS + f""".cm-me .cm-bubble{{background:{self.bubble_me_bg};border-color:{self.bubble_me_border};}}.cm-other .cm-bubble{{background:{self.bubble_other_bg};border-color:{self.bubble_other_border};}}""")
 
-    def shell(self, sid, messages=None, user=None, header_html="", extra_footer="", sprites=None, viewer_name="", room_owner="", is_working=False, partial_content="", partial_thinking="", stop_url="", owns_conversation=False):
+    def shell(self, sid, messages=None, user=None, header_html="", extra_footer="", sprites=None, viewer_name="", room_owner="", is_working=False, partial_content="", partial_thinking="", owns_conversation=False, stop_intent=""):
         style_cls = f"cm-s-{self.view_style}"
         no_in_cls = " cm-no-input" if not self.input_enabled else ""
         vname = viewer_name or (user.username if user else "")
         msgs_html = self.render_messages(messages, vname, user, sprites, room_owner, owns_conversation) if messages is not None else '<div class="cm-empty">No messages yet.</div>'
         hdr = f'<div class="cm-header">{header_html}</div>' if header_html else ""
         footer = self._footer_html(sid, extra_footer) if self.input_enabled or extra_footer else ""
-        if is_working: work_html = self.working_html(sid, stop_url).replace(' hx-swap-oob="outerHTML"', '')
+        if is_working: work_html = self.working_html(sid, stop_intent).replace(' hx-swap-oob="outerHTML"', '')
         else: work_html = f'<div id="cm-work-{sid}" class="cm-working"></div>'
         if partial_content or partial_thinking: stream_html = self.stream_content_html(sid, partial_content, partial_thinking).replace(' hx-swap-oob="innerHTML"', 'class="cm-stream"')
         else: stream_html = f'<div id="cm-stream-{sid}" class="cm-stream"></div>'
@@ -1163,9 +1172,9 @@ class ChatManager:
                        </form>
                    </div>"""
 
-    def working_html(self, sid, stop_url="") -> str:
-        """OOB-ready working indicator. Stop on right (red), status on left."""
-        stop_btn = f'<button class="cm-qbtn" hx-post="{stop_url}" hx-swap="none" style="color:#ff4444;flex-shrink:0;font-size:.75rem" title="Stop">&#x25FC; Stop</button>' if stop_url else ""
+    def working_html(self, sid, stop_intent: dict = None) -> str:
+        """OOB-ready working indicator. stop_intent, if given, is a dict of hx-vals for the stop button (type/branch/lvl/etc) rather than a URL - matches the platform's single-dispatch intent convention instead of each caller needing its own /stop/{sid} route."""
+        stop_btn = f"""<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps(stop_intent)}' style="color:#ff4444;flex-shrink:0;font-size:.75rem" title="Stop">&#x25FC; Stop</button>""" if stop_intent else ""
         return f'<div id="cm-work-{sid}" class="cm-working cm-on" hx-swap-oob="outerHTML"><span class="spin" style="flex-shrink:0">&#x25CC;</span><span style="flex:1;font-size:.7rem">Working\u2026</span>{stop_btn}</div>'
 
     def working_hide_html(self, sid) -> str: return f'<div id="cm-work-{sid}" class="cm-working" hx-swap-oob="outerHTML"></div>'
