@@ -1,5 +1,5 @@
 # main.py
-import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading, pathlib, shutil, traceback
+import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading, pathlib, shutil, traceback, asyncio
 from contextlib import contextmanager
 from urllib.parse import quote
 from fastapi import FastAPI, Request, Depends, HTTPException, Form, Response, WebSocket, status, Body
@@ -376,6 +376,9 @@ async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)
         print(f"[WS] error {user_id}: {e}")
     finally:
         await manager.disconnect(user_id, websocket)
+
+@app.on_event("startup")
+async def start_ws_heartbeat(): asyncio.create_task(manager.heartbeat_loop())
 
 # -- PWA Worker --
 
