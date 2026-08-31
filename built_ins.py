@@ -1960,10 +1960,12 @@ def new_item_modal_html(modal_id: str, create_url: str = "", picker_html: str = 
                 </script>"""
     return UI.modal(modal_id, "New File / Folder / Upload", body)
 
-def move_modal_html(modal_id: str, move_url: str, picker_html: str, item_path: str, target_id: str = "body", swap: str = "none") -> str:
+def move_modal_html(modal_id: str, move_url: str, picker_html: str, item_path: str, target_id: str = "body", swap: str = "none", intent_type: str = "", branch: str = "", lvl: int = 1) -> str:
     """Form field: path (hidden, item_path), parent (from picker_html)."""
-    return UI.modal(modal_id, "Move Item", f"""<form hx-post="{move_url}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex; flex-direction:column; gap:.4rem">
-                                                   <input type="hidden" name="path" value="{UI.escape(item_path)}">
+    post_target = "/im/in" if intent_type else move_url
+    hidden_intent = f'<input type="hidden" name="type" value="{intent_type}"><input type="hidden" name="branch" value="{branch}"><input type="hidden" name="lvl" value="{lvl}">' if intent_type else ""
+    return UI.modal(modal_id, "Move Item", f"""<form hx-post="{post_target}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex; flex-direction:column; gap:.4rem">
+                                                   {hidden_intent}<input type="hidden" name="path" value="{UI.escape(item_path)}">
                                                    <div style="font-size:.7rem;color:var(--text_muted)">Move &ldquo;{UI.escape(item_path)}&rdquo; to:</div>
                                                    {picker_html}
                                                    <button type="submit" class="ui-btn" style="margin-top:.3rem">Move</button>

@@ -120,32 +120,40 @@ class FileWatchdog:
                 conn.commit()
 
     def patch_node(self, absolute_path: str, event_type: str):
-        """Update memory and queue for database sync."""
+        """Update memory and queue for database sync. For a genuinely new path, this also links it into its parent's direct_children list - without this, a newly created file exists in the registry as an orphaned node and never appears in any tree render of its parent, since tree rendering walks direct_children rather than scanning the whole registry."""
         file_path = pathlib.Path(absolute_path).resolve()
-
         if file_path.suffix.lower() in self.skip_suffixes: return
         if any(part in self.skip_dirs or (part.startswith(".") and part != ".env") for part in file_path.parts): return
-
         abs_path = file_path.as_posix()
         parent_abs = file_path.parent.as_posix()
-
         with WORKSPACE_LOCK:
             if event_type == "deleted":
                 if abs_path in WORKSPACE_REGISTRY:
                     WORKSPACE_REGISTRY.pop(abs_path)
                     DIRTY_PATHS.add(abs_path)
+                    parent_node = WORKSPACE_REGISTRY.get(parent_abs)
+                    if parent_node and abs_path in parent_node.get("direct_children", []):
+                        parent_node["direct_children"].remove(abs_path)
+                        DIRTY_PATHS.add(parent_abs)
             else:
                 try:
-                    # Robust stat check for transient files
                     stat = file_path.stat()
                     is_dir = file_path.is_dir()
+                    is_new = abs_path not in WORKSPACE_REGISTRY
                     new_node = {"type": "folder" if is_dir else "file", "name": file_path.name, "size": stat.st_size if not is_dir else 0}
                     if not is_dir: new_node["suffix"] = file_path.suffix.lower()
+                    if is_dir: new_node["direct_children"] = WORKSPACE_REGISTRY.get(abs_path, {}).get("direct_children", [])
                     WORKSPACE_REGISTRY[abs_path] = new_node
                     DIRTY_PATHS.add(abs_path)
+                    if is_new:
+                        parent_node = WORKSPACE_REGISTRY.get(parent_abs)
+                        if parent_node is not None:
+                            parent_node.setdefault("direct_children", [])
+                            if abs_path not in parent_node["direct_children"]: parent_node["direct_children"].append(abs_path)
+                            parent_node["child_files_count"] = sum(1 for k, v in WORKSPACE_REGISTRY.items() if v.get("type") == "file" and k.startswith(parent_abs + "/"))
+                            DIRTY_PATHS.add(parent_abs)
                 except (FileNotFoundError, PermissionError):
                     return
-
         self._schedule_db_sync()
 
 # --- External Hooks ---

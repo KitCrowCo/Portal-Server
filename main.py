@@ -408,7 +408,6 @@ async def _h_portal_init(request, payload, imr):
 
 _portal_im.scripts["portal_init"] = [_h_portal_init]
 
-
 # # Needs Review ********************************************************************************
 # _shell_im.scripts["set_bridge"] = [lambda request, payload, imr: _handle_bridge_state(request, payload, imr)]
 # _shell_im.scripts["set_cfg"] = [lambda request, payload, imr: _handle_cfg_state(request, payload, imr)]
