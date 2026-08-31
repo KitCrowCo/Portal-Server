@@ -94,7 +94,7 @@ The short version is in [About](./data/_common/Information/about.md). The long v
 
 ## Status
 
-Pre-1.0. Core architecture (state system, module loading, interface manager, theming) is stable; expect breaking changes to module APIs before a 1.0 tag. Two reference modules (Wiki, RP Server) ship as working examples of the module contract via `install.sh`.
+Pre-1.0. Core architecture (state system, module loading, interface manager, theming) is stable; expect breaking changes to module APIs before a 1.0 tag. Two reference modules (Wiki, RP Server) ship as working examples of the modules.
 
 ## Contributing
 
