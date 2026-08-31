@@ -1,4 +1,4 @@
-# backend/interface_manager.py - Interface Manager
+# core_files/interface_manager.py - Interface Manager
 import asyncio, json, uuid, pathlib, os
 import time
 from typing import Any, Optional, List
@@ -257,8 +257,6 @@ class InterfaceManager:
 
     async def handle_intent(self, intent: dict, request: Request = None) -> dict:
         intent_type = intent.get("type")
-
-        # print(f"[IM] target_im's: intenet={str(intent)}, scripts={self.scripts}")  #*********************************************************************** (Debug)
         if intent_type == "initial_load":
             return {"status": "ok", "type": "initial_load"}
         elif intent_type == "update_state":
@@ -323,8 +321,6 @@ class InterfaceManager:
                     elif t == "state_write":  await set_state(request, _sub_dict(step.get("value"), p), scope=step.get("scope", "user"), namespace=step.get("namespace"), key=step.get("key"))
                     elif t == "push": await push_to_client(user_id, _sub_dict(step.get("payload", {}), p))
                     elif t == "query": p.update(await query_element(user_id, _sub(step.get("id", ""), p), step.get("fields")))
-                # else:
-                #     print(f"[IM] run_script: step={step}")  #*********************************************************************** (Debug)
             except Exception as e:
                 traceback.print_exc()
         return imr
@@ -354,7 +350,6 @@ async def handle_intent_route(request: Request) -> HTMLResponse:
         lvl = int(body.get("lvl", 1))   # default 1 - 0 is last resort
         branch = body.get("branch", "")
         target_im = None
-        #print("[DEBUG] in route:", body) # ********************
         # Exact branch match (any level, highest specificity)
         if branch:
             for level_ims in _IM_CLASS_REGISTRY.values():
@@ -388,10 +383,6 @@ async def handle_intent_route(request: Request) -> HTMLResponse:
     except Exception as e:
         print(f"[IM] handle_intent error: {e}")
         return HTMLResponse(" ", status_code=500)
-
-# /intent is the IB's conventional route - aliased to /in so IB needs no changes
-#@router.post("/intent")
-#async def handle_intent_alias(request: Request) -> HTMLResponse: return await handle_intent_route(request)
 
 @router.get("/out/{eid}")
 async def get_element_html(eid: str) -> HTMLResponse:

@@ -49,30 +49,17 @@ class ConnectionManager:
             logger.debug("WS send error: %s", e)
             return False
 
-    async def _prune_dead(self, user_id: str, dead: List[WebSocket]):
-        """Removes dead sockets from the registry and force-closes them - a failed send alone doesn't guarantee the client's own WebSocket object ever fires 'close', which leaves a phantom connection that neither side will re-establish on its own."""
-        async with self._lock:
-            cur = self.active_connections.get(user_id, [])
-            for d in dead:
-                try: cur.remove(d)
-                except ValueError: pass
-            if not cur: self.active_connections.pop(user_id, None)
-        for d in dead:
-            try: await d.close()
-            except Exception: pass
-
     async def send_personal_message(self, message, user_id: str):
         """Send to all connections for user_id, prune dead sockets."""
         async with self._lock: conns = list(self.active_connections.get(user_id, []))
         dead = [ws for ws in conns if not await self._safe_send(ws, message)]
-        if dead: await self._prune_dead(user_id, dead)
-
-    async def heartbeat_loop(self, interval: float = 25.0):
-        """Periodic keepalive broadcast. Without this, an idle proxy/firewall timeout silently kills the socket and pushed updates (streaming, live status) just stop arriving until the page is reloaded. A failed send now triggers _prune_dead's explicit close(), which the client's reconnect logic in base.html actually picks up."""
-        while True:
-            await asyncio.sleep(interval)
-            try: await self.broadcast({"t": "ping"})
-            except Exception: pass
+        if dead:
+            async with self._lock:
+                cur = self.active_connections.get(user_id, [])
+                for d in dead:
+                    try: cur.remove(d)
+                    except ValueError: pass
+                if not cur: self.active_connections.pop(user_id, None)
 
     async def send_to_users(self, message, user_ids: List[str]): await asyncio.gather(*[self.send_personal_message(message, uid) for uid in user_ids], return_exceptions=True)
 

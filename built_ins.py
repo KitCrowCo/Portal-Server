@@ -13,10 +13,7 @@ from .interface_manager import push_update
 from .file_server import notify_manual_mutation
 from PIL import Image as _PILImageThumb
 import openpyxl
-
-# Should this remain a try or be a core requirment. (depends on how heavy it is for small systems vs how expandable useful it is)
-try: import pypdf
-except ImportError: pypdf = None
+import pypdf
 
 # Three processing depths, selected via the `mode` argument:
 #   "standard"   - CommonMark-compatible subset only. Safe for untrusted input.
@@ -124,8 +121,7 @@ _TABSET_END = re.compile(r'^\{end\.tabset\}[ \t]*$')
 _HEADER = re.compile(r'^(#{1,6})[ \t]')
 
 def _extract_tabsets(lines: list[str]) -> tuple[list[str], list[dict]]:
-    """Single pass, stack-based. Returns (lines_with_tabset_bodies_removed, tabset_records).
-    A tabset closes on: {end.tabset}, a header at level <= its own level, or EOF."""
+    """Single pass, stack-based. Returns (lines_with_tabset_bodies_removed, tabset_records). A tabset closes on: {end.tabset}, a header at level <= its own level, or EOF."""
     stack = []  # [{level, title, start, children_start}]
     records = []
     out = []
@@ -701,7 +697,6 @@ def extract_file_text(path: Path, max_excel_rows: int = 500) -> str:
                 for row in ws.iter_rows(values_only=True, max_row=max_excel_rows): rows.append(",".join(str(c or "") for c in row))
             return "\n".join(rows)
         if ext == ".pdf":
-            if not pypdf: return "[PDF extraction unavailable - pypdf not installed]"
             reader = pypdf.PdfReader(str(path))
             return "\n\n".join(pg.extract_text() or "" for pg in reader.pages)
     except Exception as e: return f"[extraction error: {e}]"
@@ -2422,7 +2417,6 @@ class ShadowStore:
         else: self._bp(rel_path).write_bytes(f.read_bytes()); self._apply_binary(rel_path); self._bp(rel_path).unlink(missing_ok=True)
         return True
 
-
 def shadow_review_html(shadow, intent_type: str, extra_vals: dict = None, list_id: str = "shadow-list") -> str:
     """Every button POSTs /im/in with {type: intent_type, action: accept|reject|diff, path, diff_target, **extra_vals}.
     Caller registers ONE intent handler that switches on payload['action'] - no per-action routes."""
@@ -2472,8 +2466,7 @@ class PromptBlockLibrary:
     def delete(self, block_id: str): self.path.write_text(json.dumps([b for b in self.list() if b["id"] != block_id], indent=2))
 
 def prompt_block_picker_html(library: "PromptBlockLibrary", textarea_id: str, save_url: str) -> str:
-    """Dropdown + insert/save controls targeting a specific textarea by id.
-    Insert APPENDS to the field's current value (mix-and-match composition), not replace - multiple blocks layer into one field across repeated inserts."""
+    """Dropdown + insert/save controls targeting a specific textarea by id. Insert APPENDS to the field's current value (mix-and-match composition), not replace - multiple blocks layer into one field across repeated inserts."""
     blocks = library.list()
     opts = "".join(f'<option value="{b["id"]}" data-text="{UI.escape(b["text"])}">{UI.escape(b["name"])}</option>' for b in blocks) or '<option value="">(no blocks saved)</option>'
     return f"""<div class="pb-picker" data-save-url="{save_url}" style="display:flex;gap:.3rem;align-items:center;margin:.2rem 0">
