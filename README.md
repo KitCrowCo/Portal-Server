@@ -16,17 +16,53 @@ No telemetry. No accounts you don't control. No forced obsolescence. Runs on har
 
 ## Install
 
-To install the Core Server plus the standard reference modules (Wiki, RP Server, Git Manager) in one step:
+The Portal Server is designed to be installed in one step. The standard build automatically includes the **Wiki** and **RP Server** modules so you have a fully functional ecosystem immediately.
 
+### Step 1: Install Prerequisites (Docker)
+
+**For Windows Users:**
+1. Open PowerShell as Administrator and type `wsl --install` to enable Windows Subsystem for Linux. Restart your computer if prompted.
+2. Download and install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows/). Ensure it is set to use the WSL 2 backend in its settings.
+
+**For Mac Users:**
+Download and install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac/).
+
+**For Linux Users:**
+Install Docker and Docker Compose via your package manager:
 ```bash
-git clone https://git.kitcrowco.com/KitCrowCo/Portal_Server.git
-cd Portal_Server
-docker compose up -d --build
+sudo apt update
+sudo apt install docker.io docker-compose-v2
 ```
 
+### Step 2: Run the Server
+Open your terminal (or WSL via `wsl -d ubuntu` from Command Prompt on Windows) and run these three commands:
+
+```bash
+git clone [https://github.com/KitCrowCo/Portal-Server.git](https://github.com/KitCrowCo/Portal-Server.git)
+cd Portal-Server
+docker compose up -d --build
+```
+That's it. The setup will automatically download the core files, fetch the standard modules, and start the server.
+
+### Step 3: Log In
 Then visit `http://localhost:8000`. First run creates an admin account from the `ADMIN_USER`/`ADMIN_PASS` environment variables (defaults to `admin`/`admin` — **change this immediately**, either before first boot via your `docker-compose.yml` or in Control Panel right after logging in).
 
 See [Getting Started](https://github.com/KitCrowCo/Portal-Server/blob/main/static/information/getting_started.md) for a tour of the interface.
+
+### Secure Remote Access (Cloudflare Tunnels)
+If you want to access your Portal Server from outside your home network (e.g., on your phone over cellular data) without the security risks of port forwarding, we recommend using a Cloudflare Tunnel.
+
+Create a free account on Cloudflare Zero Trust.
+
+Navigate to Networks -> Tunnels and click Create a tunnel.
+
+Name your tunnel and select your operating system environment (e.g., Docker).
+
+Cloudflare will give you a specific Docker command to run on your host machine. Run it.
+
+In the Cloudflare dashboard, route a public hostname (e.g., portal.yourdomain.com) to your local Portal Server address: `http://localhost:8000`.
+
+Your server is now securely accessible from anywhere, protected by Cloudflare's HTTPS and security layers, without exposing your home IP address.
 
 ## Why Multiple Repos?
 
