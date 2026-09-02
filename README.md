@@ -19,14 +19,14 @@ No telemetry. No accounts you don't control. No forced obsolescence. Runs on har
 To install the Core Server plus the standard reference modules (Wiki, RP Server, Git Manager) in one step:
 
 ```bash
-git clone [https://git.kitcrowco.com/KitCrowCo/Portal_Server.git](https://git.kitcrowco.com/KitCrowCo/Portal_Server.git)
+git clone https://git.kitcrowco.com/KitCrowCo/Portal_Server.git
 cd Portal_Server
 docker compose up -d --build
 ```
 
 Then visit `http://localhost:8000`. First run creates an admin account from the `ADMIN_USER`/`ADMIN_PASS` environment variables (defaults to `admin`/`admin` — **change this immediately**, either before first boot via your `docker-compose.yml` or in Control Panel right after logging in).
 
-See [Getting Started](https://www.google.com/search?q=./data/_common/Information/getting_started.md) for a tour of the interface.
+See [Getting Started](https://github.com/KitCrowCo/Portal-Server/blob/main/static/information/getting_started.md) for a tour of the interface.
 
 ## Why Multiple Repos?
 
@@ -61,8 +61,8 @@ The AI Tools suite (chat, knowledge base, pipeline builder, image generation) is
 To include them, clone them into your local directories before building the container:
 
 ```bash
-git clone [https://git.kitcrowco.com/KitCrowCo/Portal-Server_Module_AI_Tools.git](https://git.kitcrowco.com/KitCrowCo/Portal-Server_Module_AI_Tools.git) modules/ai_tools
-git clone [https://git.kitcrowco.com/KitCrowCo/Portal-Server_Tool_AI_Manager.git](https://git.kitcrowco.com/KitCrowCo/Portal-Server_Tool_AI_Manager.git) tools/ai_manager
+git clone https://git.kitcrowco.com/KitCrowCo/Portal_Server_Module_AI_Tools.git
+git clone https://git.kitcrowco.com/KitCrowCo/Portal_Server_Module_AI_Manager.git
 docker compose up -d --build
 ```
 

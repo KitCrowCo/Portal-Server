@@ -46,6 +46,8 @@ templates = Jinja2Templates(directory = "core_files/templates")
 templates.env.globals.update(os = os, verbose = VERBOSE, UI = UI, STYLE_GROUPS = STYLE_GROUPS)
 set_cp_templates(templates)
 
+_REFRESH_THREAD_LOCK = threading.Lock()
+
 # All Data goes here
 os.makedirs("./data", exist_ok=True)
 os.makedirs("./data/_common", exist_ok=True)
@@ -129,7 +131,7 @@ def check_module_dependencies(module_path: str):
         missing = [d for d in deps if d.split("==")[0].lower() not in installed]
         if missing:
             print(f"--- WARNING: {module_path} missing deps: {missing} ---")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", *missing])
 
 def load_server_router(path, item, prefix, dependencies={}, router_type="module", path_modifier="", verbose=VERBOSE):
     global metas
