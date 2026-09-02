@@ -719,11 +719,12 @@ async def _intent_toggle_toolbar(request, payload, imr):
 # Produces IM-compatible intent handlers for any module that wants persistent tabbed navigation backed by scoped state.
 # payload is a state package if none is passed it loads it - otherwise this is just focused on nav_bar
 
-async def tab_bar_from_state(state: dict, tab_bar_id: str, intent_prefix: str = "", nesting_level = 1, allow_new: bool = True, closable: bool = True) -> str:
+async def tab_bar_from_state(state: dict, tab_bar_id: str, intent_prefix: str = "", nesting_level = 1, allow_new: bool = True, closable: bool = True, show_back: bool = False) -> str:
     ordered = sorted(state.get("tabs", {}).values(), key=lambda t: t.get("order", 0))
     tabs_html = "".join(UI.tab(t.get("label","tab"), t.get("id", t.get("order", 0)), active = (t.get("id", t.get("order", 0)) == state.get("active")), icon = t.get("icon", ""), tooltip = t.get("path", ""), back_attrs = ({"post":"/im/in","swap":"none","target":"body","vals":json.dumps({"type": f"{intent_prefix}_back","lvl": nesting_level,"branch": intent_prefix,"id": t.get("id", t.get("order", 0))})} if t.get("history") else None), data_reorder_type=f"{intent_prefix}_reorder", data_branch=intent_prefix, data_lvl=nesting_level, on_close = ({"post":"/im/in", "swap":"none", "target":"body", "vals": json.dumps({"type": f"{intent_prefix}_close_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})} if closable else None), htmx = {"post":"/im/in", "swap": "none", "target":"body","vals": json.dumps({"type": f"{intent_prefix}_focus_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})}) for t in ordered)
     add_btn = {"post":"/im/in", "target":"body", "vals":json.dumps({"type": f"{intent_prefix}_open_tab", "lvl": nesting_level, "branch": intent_prefix}), "swap":"none"} if allow_new else None
-    return UI.tab_bar(content = tabs_html, id = tab_bar_id, add_btn = add_btn, nesting_level = nesting_level)
+    back_btn = {"post":"/im/in", "target":"body", "vals":json.dumps({"type": f"{intent_prefix}_back", "lvl": nesting_level, "branch": intent_prefix}), "swap":"none"} if show_back else None
+    return UI.tab_bar(content = tabs_html, id = tab_bar_id, add_btn = add_btn, back_btn = back_btn, nesting_level = nesting_level)
 
 # --- Tab Manager ---
 # Reusable tab system manager with built-in lower-level error interception.
@@ -731,7 +732,8 @@ async def tab_bar_from_state(state: dict, tab_bar_id: str, intent_prefix: str = 
 class TabManager:
     _ROUTING_KEYS = {"type", "lvl", "branch", "intent", "module_intent", "cid", "t"}  # IM/intent dispatch metadata - never persisted into tab state
 
-    def __init__(self, namespace, tab_bar_id, content_id, render_content_fn, intent_prefix = "", scope = "user", empty = None, IM = None, tab_bar_fn = None, nesting_level = 1, allow_new = True, closable = True, dedupe_path = False):
+    def __init__(self, namespace, tab_bar_id, content_id, render_content_fn, intent_prefix = "", scope = "user", empty = None, IM = None, tab_bar_fn = None, nesting_level = 1, allow_new = True, closable = True, dedupe_path = False, show_back = False):
+        self.show_back = show_back
         self.namespace = namespace
         self.tab_bar_id = tab_bar_id
         self.content_id = content_id
@@ -813,7 +815,7 @@ class TabManager:
         if not state: state = await self._load(request)
         state = self.next_active(state)
         state, content_html = await self.safe_render_content(request, state) # Routed through the internal safety wrapper
-        bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable)
+        bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable, show_back=self.show_back)
         await self._save(request, state)
         imr.oob(bar_html, self.tab_bar_id, swap="outerHTML")
         imr.oob(content_html, self.content_id)
@@ -869,7 +871,7 @@ class TabManager:
             for i, k in enumerate(keys): 
                 if isinstance(state["tabs"][k], dict): state["tabs"][k]["order"] = i
         await self._save(request, state)
-        bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable)
+        bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable, show_back=self.show_back)
         imr.oob(bar_html, self.tab_bar_id, swap="outerHTML")
         return imr
 

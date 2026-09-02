@@ -192,19 +192,6 @@ def get_module_list(module_type="module"):
 async def cp_module_access(request: Request, user=Depends(get_current_user)):
     if user.role != "admin": return HTMLResponse("Unauthorized")
     cfg = await get_state(request, scope = "single", namespace = "_portal", key = "module_access")
-    form = await request.form()
-    modules = get_module_list()
-    new_cfg = {}
-    for m in modules:
-        allowed = form.getlist(f"mod_{m}")
-        if allowed: new_cfg[m] = allowed
-    await set_state(request, new_cfg, scope = "single", namespace = "_portal", key = "module_access")
-    return HTMLResponse("<span style='color:var(--accent);'>&#x2713; Saved.</span>")
-
-@router.get("/module-access", response_class=HTMLResponse)
-async def cp_module_access(request: Request, user=Depends(get_current_user)):
-    if user.role != "admin": return HTMLResponse("Unauthorized")
-    cfg = await get_state(request, scope = "single", namespace = "_portal", key = "module_access")
     all_roles = ["admin", "moderator", "user", "guest"]
     modules = get_module_list()
     rows = ""

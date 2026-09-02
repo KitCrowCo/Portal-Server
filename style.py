@@ -230,9 +230,11 @@ class UI:
 
     @staticmethod
     def tab_bar(content="", id="tab-bar", **kwargs):
-        """Generic tab bar container. id sits on the OUTER wrapper (strip + add-button) so an outerHTML OOB swap replaces the whole unit atomically - swapping only the inner strip left a permanent duplicate add-button behind on every tab open/close (its sibling was never touched by the swap)."""
+        """Generic tab bar container. id sits on the OUTER wrapper (strip + add-button) so an outerHTML OOB swap replaces the whole unit atomically."""
         add_btn_html = f"""<div class="tab" title="New tab" style="opacity: 0.6; flex: 0 0 auto; border-left: var(--border-thick) solid var(--border);" {UI.htmx_html(kwargs.get("add_btn", {}))}>+</div>""" if kwargs.get("add_btn") else ""
+        back_btn_html = f"""<div class="tab" title="Back" style="opacity: 0.6; flex: 0 0 auto; border-right: var(--border-thick) solid var(--border);" {UI.htmx_html(kwargs.get("back_btn", {}))}>&#x2190;</div>""" if kwargs.get("back_btn") else ""
         return f"""<div id="{id}" class="tabs-container" data-nesting="{kwargs.get("nesting_level", 1)}" style="display: flex; width: 100%; border-bottom: var(--border-thick) solid var(--border); background: var(--bg_panel);">
+                        {back_btn_html}
                         <div class="tab-bar" style="{kwargs.get("style", "display:flex; flex:1; overflow-x:auto; scrollbar-width:none; align-items:stretch;")}"{UI.htmx_html(kwargs.get("htmx", {}))}>{content}</div>
                         {add_btn_html}
                     </div>"""
