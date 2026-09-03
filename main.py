@@ -408,10 +408,6 @@ async def _h_portal_init(request, payload, imr):
     imr.oob(content_html, target)
     return imr
 
-_portal_im.scripts["portal_init"] = [_h_portal_init]
-_shell_im.scripts["set_bridge"] = [_handle_bridge_state]
-_shell_im.scripts["set_cfg"] = [_handle_cfg_state]
-
 async def _handle_bridge_state(request, payload, imr):
     open_val = payload.get("open", "false").lower() == "true"
     await set_state(request, open_val, scope="session", namespace="_im", key="bridge_open")
@@ -424,6 +420,10 @@ async def _handle_cfg_state(request, payload, imr):
         cfg[key] = val
         await set_state(request, cfg, scope="user", namespace="_im", key="cfg")
     return imr
+
+_portal_im.scripts["portal_init"] = [_h_portal_init]
+_shell_im.scripts["set_bridge"] = [_handle_bridge_state]
+_shell_im.scripts["set_cfg"] = [_handle_cfg_state]
 
 @app.get("/")
 async def dashboard(request: Request, user=Depends(get_current_user)):

@@ -38,7 +38,7 @@ sudo apt install docker.io docker-compose-v2
 Open your terminal (or WSL via `wsl -d ubuntu` from Command Prompt on Windows) and run these three commands:
 
 ```bash
-git clone [https://github.com/KitCrowCo/Portal-Server.git](https://github.com/KitCrowCo/Portal-Server.git)
+git clone https://github.com/KitCrowCo/Portal-Server.git
 cd Portal-Server
 docker compose up -d --build
 ```
@@ -125,8 +125,7 @@ Commercial use of the AI Tools codebase is exclusively available via FSEP, if an
 This project is self funded and any support is appreciated and can be through this square link [Donate](https://square.link/u/1e32E3gY)  - a joint effort spanning this codebase and my own similar work as well as Mephie's events and advocacy work centering women and marginalized/queer people in games and media.
 
 ## Philosophy
-
-The short version is in [About](./data/_common/Information/about.md). The long version — the full architectural reasoning, the layered-security model, the accessibility commitments, and where this is headed — is written as a living design document rather than static marketing copy - This will be in the core files at a later update.
+The short version is in [About](https://github.com/KitCrowCo/Portal-Server/blob/main/static/information/about.md). The long version — the full architectural reasoning, the layered-security model, the accessibility commitments, and where this is headed — is written as a living design document rather than static marketing copy - This will be in the core files at a later update.
 
 ## Status
 
