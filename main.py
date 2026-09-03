@@ -1,5 +1,5 @@
 # main.py
-import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading, pathlib, shutil, traceback, asyncio
+import os, sys, uuid, importlib, logging, re, subprocess, pkg_resources, threading, pathlib, shutil, traceback, asyncio, site
 from contextlib import contextmanager
 from urllib.parse import quote
 from fastapi import FastAPI, Request, Depends, HTTPException, Form, Response, WebSocket, status, Body
@@ -132,6 +132,9 @@ def check_module_dependencies(module_path: str):
         if missing:
             print(f"--- WARNING: {module_path} missing deps: {missing} ---")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", *missing])
+            site.addsitedir(site.getusersitepackages())
+            importlib.invalidate_caches()
+            pkg_resources.working_set = pkg_resources.WorkingSet()
 
 def load_server_router(path, item, prefix, dependencies={}, router_type="module", path_modifier="", verbose=VERBOSE):
     global metas
@@ -424,6 +427,7 @@ async def _handle_cfg_state(request, payload, imr):
 _portal_im.scripts["portal_init"] = [_h_portal_init]
 _shell_im.scripts["set_bridge"] = [_handle_bridge_state]
 _shell_im.scripts["set_cfg"] = [_handle_cfg_state]
+
 
 @app.get("/")
 async def dashboard(request: Request, user=Depends(get_current_user)):
