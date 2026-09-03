@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Depends, HTTPException, Form, Response, We
 from fastapi.routing import APIRoute, Mount
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from jose import jwt, JWTError
@@ -23,6 +23,7 @@ from .style import *
 from .interface_manager import router as im_router, set_ws_manager, InterfaceManager, IMResponse, push_fragment, push_to_client, route_ws_intent
 from .file_server import *
 from . import built_ins as bf
+from starlette.websockets import WebSocketDisconnect
 
 # -- DB init --
 Base.metadata.create_all(bind=engine)
@@ -377,6 +378,8 @@ async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)
                 else: await manager.on_incoming_message(user_id, data)
             else:
                 await manager.on_incoming_message(user_id, data)
+    except WebSocketDisconnect:
+        pass
     except Exception as e:
         print(f"[WS] error {user_id}: {e}")
     finally:
@@ -496,5 +499,8 @@ async def force_rescan():
     if not wd: return HTMLResponse("<span style='color:#ffaa44;'>Workspace service not ready yet - try again in a moment.</span>", status_code=503)
     wd.initial_baseline_crawl()
     return HTMLResponse("&#x2713;")
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt(): return PlainTextResponse("User-agent: *\nDisallow: /\nAllow: /public/\n")
 
 threading.Thread(target=start_workspace_service, args=(ROOT_DIR,), daemon=True).start()

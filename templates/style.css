@@ -243,3 +243,4 @@ button.htmx-request { opacity: .6; pointer-events: none; }
 .stat-card .su { font-size:calc(var(--font-size) * 0.75); font-weight:400; }
 .stat-card .ss { font-size:calc(var(--font-size) * 0.7); color:var(--text_muted); margin-top:0.15rem; }
 
+@media (max-width: 46rem) { html, body { font-size: 1rem; } }

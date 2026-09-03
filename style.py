@@ -370,7 +370,8 @@ class UI:
                 if visible_fn and not visible_fn(rel_str): continue
                 is_dir = (child_node["type"] == "folder")
                 vals = {**extra_vals, "path": rel_str, "is_dir": str(is_dir).lower(), "label": child_node["name"], "id": f"tree-{abs(hash(rel_str)) % 0xFFFFFF:06x}"}
-                hx_attrs = f'hx-post="{post_url}" hx-vals=\'{json.dumps(vals)}\' hx-target="{target}" hx-swap="{swap}" hx-trigger="{"change" if selectable else "click"}"' if post_url else ""
+                vals_json = json.dumps(vals).replace("'", "&#39;")
+                hx_attrs = f"""hx-post="{post_url}" hx-vals='{vals_json}' hx-target="{target}" hx-swap="{swap}" hx-trigger='{"change" if selectable else "click"}'""" if post_url else ""
                 pl = f"{depth * 0.72:.2f}rem"
                 is_active = rel_str in active
                 ctx_btn = f"""<span style="flex-shrink:0;position:relative">
@@ -403,7 +404,7 @@ class UI:
                     row_hx = hx_attrs if not selectable and hx_attrs else ""
                     size_val = child_node.get("size", 0)
                     size_str = f"{size_val//1024:.0f}K" if size_val >= 1024 else f"{size_val}B"
-                    out += f"""<div class="tree-fs-row {"tree-active" if is_active else ""}" style="cursor:pointer;padding:.1rem .3rem .1rem {pl};display:flex;align-items:center;gap:.28rem;font-size:.7rem;border-bottom:var(--border-thick) solid var(--border)" {row_hx}>
+                    out += f"""<div class="tree-fs-row {"tree-active" if is_active else ""}" style="cursor:pointer;padding:.1rem .3rem .1rem {pl};display:flex;align-items:center;gap:.3rem;font-size:.7rem;border-bottom:var(--border-thick) solid var(--border)" {row_hx}>
                                    {cb}
                                    <span style="flex:1;color:{"var(--accent)" if rel_str in selected else "var(--text)"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{icon} {UI.escape(label_fn(child_node["name"]) if label_fn else child_node["name"])}</span>
                                    <span style="flex-shrink:0;color:var(--text_muted);font-size:.63rem">{size_str}</span>
@@ -423,11 +424,13 @@ class UI:
             if children:
                 html += f'<details class="tree-node {row_cls}" style="padding-left:{indent}rem;"><summary class="tree-summary" style="display:flex;align-items:center;gap:.3rem;cursor:pointer;list-style:none"><span class="tree-icon">{icon}</span><span class="tree-label" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{UI.escape(name)}</span>{UI._context_menu(UI.escape(item_path), mode)}</summary>{UI.tree(children, mode=mode, depth=depth+1, options=options, active=active)}</details>'
             else:
-                if "action" in options: htmx_attrs = options["action"]
+                if "action" in options:
+                    htmx_attrs = options["action"]
                 else:
                     vals = {"action": "open", "path": item_path}
                     vals.update(options.get("extra_vals", {}))
-                    htmx_attrs = UI.htmx_html({"post": options.get("post", "/open"), "target": options.get("target", "#content"), "swap": options.get("swap", "none"), "vals": json.dumps(vals)})
+                    vals_json = json.dumps(vals).replace("'", "&#39;")
+                    htmx_attrs = UI.htmx_html({"post": options.get("post", "/open"), "target": options.get("target", "#content"), "swap": options.get("swap", "none"), "vals": vals_json})
                 html += f'<div class="tree-leaf {row_cls}" style="padding-left:{indent}rem;display:flex;align-items:center;gap:.3rem;{"cursor:pointer;" if htmx_attrs else ""}" {htmx_attrs}><span class="tree-icon">{icon}</span><span class="tree-label" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{UI.escape(name)}</span>{UI._context_menu(UI.escape(item_path), mode)}</div>'
         return html
 
