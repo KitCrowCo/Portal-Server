@@ -1069,7 +1069,8 @@ class ChatManager:
         self.bubble_me_border = kwargs.get('bubble_me_border', 'rgba(0, 180, 255, .4)')
         self.bubble_other_bg = kwargs.get('bubble_other_bg', 'var(--glass)')
         self.bubble_other_border = kwargs.get('bubble_other_border', 'var(--border)')
-
+        self.show_info = kwargs.get('show_info', True)
+        self.show_model = kwargs.get('show_model', False)
         self.branch_id = kwargs.get('branch_id', '')
         self.nesting_level = kwargs.get('nesting_level', 1)
         self.IM = kwargs.get('IM', None)
@@ -1116,7 +1117,7 @@ class ChatManager:
         t = msg.get("timestamp","") or msg.get("created_at","")
         ts = (str(t)[:16].replace("T"," ") if isinstance(t, str) else t.strftime("%H:%M")) if t else ""
         info_parts = []; tok_count = f'~{len(content_raw)//4}t' if self.show_info else ""
-        if self.show_info and msg.get("model"): info_parts.append(msg["model"].split(":")[0])
+        if self.show_model and msg.get("model"): info_parts.append(msg["model"].split(":")[0])
         if self.show_info and msg.get("prompt_tokens"): info_parts.append(f'{msg["prompt_tokens"]}+{msg.get("response_tokens",0)}t')
         meta_left = UI.escape(display) if not is_me else ""
         meta_right = " ".join(filter(None, [ts] + info_parts + ([tok_count] if tok_count else [])))
