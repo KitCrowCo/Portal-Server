@@ -45,13 +45,15 @@ class UIString(Base):
     key   = Column(String, unique = True, nullable = False)
     value = Column(Text)
 
+from sqlalchemy.orm import declarative_base, relationship, backref
+...
 class UserState(Base):
     """Per-user persistent state. One row per user. Namespaced by module inside the JSON blob."""
     __tablename__ = "user_state"
     id      = Column(Integer, primary_key = True)
     user_id = Column(Integer, ForeignKey("users.id"), unique = True, nullable = False)
     state   = Column(MutableDict.as_mutable(JSON), default = dict, nullable = True)
-    user    = relationship("User", backref="state")
+    user    = relationship("User", backref=backref("state", cascade="all, delete-orphan"))
 
 class ServerState(Base):
     """
