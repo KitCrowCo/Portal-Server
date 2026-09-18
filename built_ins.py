@@ -2339,10 +2339,11 @@ class ShadowStore:
     This is the "stakes" boundary: the person who owns the data's value stays in the loop for every change, proportional to nothing - it's the same gate whether the change is trivial or precious, because the AI cannot know which is which.
     Binary entries skip diffing (nothing meaningful to diff) but go through the identical stage/accept/reject/rollback lifecycle as text.
     """
-    def __init__(self, fm, store_dir, **kwargs):
+    def __init__(self, fm, store_dir, auto_accept: bool = False, **kwargs):
         self.fm = fm
         self.dir = Path(store_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.auto_accept = auto_accept
 
     def _key(self, rel_path): return hashlib.sha1(rel_path.encode()).hexdigest()[:20]
     def _sp(self, rel_path): return self.dir / f"{self._key(rel_path)}.json"
@@ -2353,12 +2354,14 @@ class ShadowStore:
         except Exception: base = ""
         entry = {"path": rel_path, "kind": "text", "base": base, "proposed": new_content, "author": author, "status": "pending", "staged": time.time()}
         self._sp(rel_path).write_text(json.dumps(entry, indent=2))
+        if self.auto_accept: self.accept(rel_path); entry["status"] = "accepted"
         return entry
 
     def stage_binary(self, rel_path: str, data: bytes, author: str = "ai") -> dict:
         entry = {"path": rel_path, "kind": "binary", "author": author, "status": "pending", "staged": time.time(), "size": len(data)}
         self._bp(rel_path).write_bytes(data)
         self._sp(rel_path).write_text(json.dumps(entry, indent=2))
+        if self.auto_accept: self.accept(rel_path); entry["status"] = "accepted"
         return entry
 
     def pending(self) -> list:
