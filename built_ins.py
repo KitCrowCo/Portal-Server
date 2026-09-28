@@ -317,11 +317,12 @@ def _render_list_blocks(text: str, task_interactive: bool, task_counter: list) -
             if not m: break
             indent, num, task, content = len(m.group(1)), m.group(3), m.group(4), m.group(5)
             tag = "ol" if num else "ul"
+            start = f" start={num}" if num else ""
             while stack and indent < stack[-1][0]: block.append(f"</{stack.pop()[1]}>")
             if not stack or indent > stack[-1][0]:
-                stack.append((indent, tag)); block.append(f'<{tag} style="padding-left:1.5rem; margin:.4rem 0;">')
+                stack.append((indent, tag)); block.append(f"""<{tag}{start} style="padding-left:1.5rem; margin:.4rem 0;">""")
             elif stack[-1][1] != tag:
-                block.append(f"</{stack[-1][1]}>"); stack[-1] = (indent, tag); block.append(f'<{tag} style="padding-left:1.5rem; margin:.4rem 0;">')
+                block.append(f"</{stack[-1][1]}>"); stack[-1] = (indent, tag); block.append(f"""<{tag}{start} style="padding-left:1.5rem; margin:.4rem 0;">""")
             if task is not None:
                 checked = task.lower() == 'x'; idx = task_counter[0]; task_counter[0] += 1
                 cls = ' class="md-task-done"' if checked else ""
@@ -959,9 +960,30 @@ CHAT_CSS = """
 
 CHAT_SCRIPT = """
 function cmCopyText(text) {
-    var done = function(){ cmToast('Copied'); };
-    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done).catch(function(){ cmCopyFallback(text); done(); }); }
-    else { cmCopyFallback(text); done(); }
+    if (!text) { cmToast('Nothing to copy'); return; }
+    var ok = function(){ cmToast('Copied'); }, bad = function(){ cmToast('Copy failed'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(ok).catch(function(){ if (cmCopyFallback(text)) ok(); else bad(); }); }
+    else { if (cmCopyFallback(text)) ok(); else bad(); }
+}
+function cmCopyFallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    var r = false;
+    try { r = document.execCommand('copy'); } catch(e) {}
+    document.body.removeChild(ta);
+    return r;
+}
+function cmCopyConversation(sid) {
+    var msgs = document.getElementById('cm-msgs-' + sid);
+    if (!msgs) { cmToast('Nothing to copy'); return; }
+    var NL = String.fromCharCode(10);
+    var parts = Array.from(msgs.querySelectorAll('.cm-msg')).map(function(m) {
+        var b = m.querySelector('.cm-bubble'); if (!b) return '';
+        var who = m.classList.contains('cm-me') ? 'You' : (m.classList.contains('cm-sys') ? 'System' : 'Assistant');
+        return '**' + who + ':** ' + (b.dataset.raw || b.innerText);
+    }).filter(Boolean);
+    cmCopyText(parts.join(NL + NL));
 }
 function cmToast(msg) {
     var t = document.createElement('div');
@@ -969,14 +991,7 @@ function cmToast(msg) {
     t.style.cssText = 'position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);background:var(--accent_dim);color:var(--accent);border:var(--border-thick) solid var(--accent);padding:.4rem .9rem;border-radius:var(--radius);font-size:.8rem;z-index:99999;opacity:0;transition:opacity .15s';
     document.body.appendChild(t);
     requestAnimationFrame(function(){ t.style.opacity='1'; });
-    setTimeout(function(){ t.style.opacity='0'; setTimeout(function(){ t.remove(); }, 200); }, 1400);
-}
-function cmCopyFallback(text) {
-    var ta = document.createElement('textarea');
-    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta); ta.focus(); ta.select();
-    try { document.execCommand('copy'); } catch(e) {}
-    document.body.removeChild(ta);
+    setTimeout(function(){ t.style.opacity='0'; setTimeout(function(){ t.removt.body.removeChild(ta);
 }
 (function(){
     // Auto-resize input and estimate tokens
@@ -1128,14 +1143,15 @@ class ChatManager:
         acts = []
         if self.allow_copy and mid: acts.append(f"""<button class="cm-act" onclick="cmCopyText(document.getElementById('cm-bubble-{mid}').dataset.raw||'')" title="Copy markdown">&#x2398;</button>""")
         if can_edit and self.allow_edit and mid:
-            if self.action_intent_prefix:
+            if s _prefix:
                 acts.append(f'<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{{"type":"{self.action_intent_prefix}_msg_edit_form","id":"{mid}","lvl":{self.nesting_level}}}\' title="Edit">&#x270E;</button>')
-            elif self.base_url:
-                acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>')
+       ase_url:
+                acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="
+            if role == "user": acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type":"{self.action_intent_prefix}_msg_retry","id":"{mid}","lvl":{self.nesting_level}}}' title="Retry from here">&#x21BA;</button>""")Edit">&#x270E;</button>')
         if can_delete and self.allow_delete and mid:
-            if self.action_intent_prefix:
+            if s _prefix:
                 acts.append(f'<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{{"type":"{self.action_intent_prefix}_msg_delete","id":"{mid}","lvl":{self.nesting_level}}}\' hx-confirm="Delete?" title="Delete">&#x2715;</button>')
-            elif self.base_url:
+       ase_url:
                 acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
         # if can_edit and self.allow_edit and mid and self.base_url: acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>')
         # if can_delete and self.allow_delete and mid and self.base_url: acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
@@ -1152,8 +1168,8 @@ class ChatManager:
         if self.think_toggle: opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="think" value="1"> Think</label>')
         opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="render_md" value="1" checked> Fmt</label>')
         if self.pin_enabled: opts.append(f'<button type="button" class="cm-qbtn cm-pin-on" data-cm-pin="{sid}" title="Pin to bottom">&#x25BC;</button>')
-        opts.append(f"""<button type="button" class="cm-qbtn" onclick="var t=document.getElementById('cm-in-{sid}');if(t)cmCopyText(t.value)" title="Copy input">&#x2398;</button>""")
-        if self.show_export: opts.append(f"""<button type="button" class="cm-qbtn" onclick="cmCopyText(document.getElementById('cm-msgs-{sid}').innerText||'')" title="Copy conversation">&#x1F4E5;</button>""")
+        opts.append(f"""<button type="button" class="cm-qbtn" onclick="var t=document.getElementById('cm-in-{sid}');if(t)cmCopyText(t.value)" title="Copy inp
+        if self.show_export: opts.append(f"""<button type="button" class="cm-qbtn" onclick="cmCopyConversation('{sid}')" title="Copy conversation">&#x1F4E5;</button>""")n">&#x1F4E5;</button>""")
         if extra_footer: opts.append(extra_footer)
         return f"""<div class="cm-footer">
                        <form class="cm-form" data-cm-sid="{sid}" hx-post="/im/in" hx-include="this" hx-swap="none">
