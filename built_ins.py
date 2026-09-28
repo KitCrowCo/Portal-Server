@@ -1,4 +1,5 @@
 # built_ins.py
+
 import re, json, uuid, difflib, os, html, shutil, asyncio, time, copy, base64
 import base64
 import mimetypes
@@ -991,7 +992,7 @@ function cmToast(msg) {
     t.style.cssText = 'position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);background:var(--accent_dim);color:var(--accent);border:var(--border-thick) solid var(--accent);padding:.4rem .9rem;border-radius:var(--radius);font-size:.8rem;z-index:99999;opacity:0;transition:opacity .15s';
     document.body.appendChild(t);
     requestAnimationFrame(function(){ t.style.opacity='1'; });
-    setTimeout(function(){ t.style.opacity='0'; setTimeout(function(){ t.removt.body.removeChild(ta);
+    setTimeout(function(){ t.style.opacity='0'; setTimeout(function(){ t.remove(); }, 200); }, 1400);
 }
 (function(){
     // Auto-resize input and estimate tokens
@@ -1143,18 +1144,12 @@ class ChatManager:
         acts = []
         if self.allow_copy and mid: acts.append(f"""<button class="cm-act" onclick="cmCopyText(document.getElementById('cm-bubble-{mid}').dataset.raw||'')" title="Copy markdown">&#x2398;</button>""")
         if can_edit and self.allow_edit and mid:
-            if s _prefix:
-                acts.append(f'<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{{"type":"{self.action_intent_prefix}_msg_edit_form","id":"{mid}","lvl":{self.nesting_level}}}\' title="Edit">&#x270E;</button>')
-       ase_url:
-                acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="
-            if role == "user": acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type":"{self.action_intent_prefix}_msg_retry","id":"{mid}","lvl":{self.nesting_level}}}' title="Retry from here">&#x21BA;</button>""")Edit">&#x270E;</button>')
+            if self.action_intent_prefix: acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type": "{self.action_intent_prefix}_msg_edit_form", "id": "{mid}", "lvl":{self.nesting_level}}}' title="Edit">&#x270E;</button>""")
+            elif self.base_url: acts.append(f"""<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>""")
+            if role == "user": acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type": "{self.action_intent_prefix}_msg_retry", "id": "{mid}", "lvl":{self.nesting_level}}}' title='Retry from here'>&#x21BA;</button>""")
         if can_delete and self.allow_delete and mid:
-            if s _prefix:
-                acts.append(f'<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{{"type":"{self.action_intent_prefix}_msg_delete","id":"{mid}","lvl":{self.nesting_level}}}\' hx-confirm="Delete?" title="Delete">&#x2715;</button>')
-       ase_url:
-                acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
-        # if can_edit and self.allow_edit and mid and self.base_url: acts.append(f'<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>')
-        # if can_delete and self.allow_delete and mid and self.base_url: acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
+            if self.action_intent_prefix: acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type": "{self.action_intent_prefix}_msg_delete", "id": "{mid}", "lvl":{self.nesting_level}}}' hx-confirm="Delete?" title='Delete'>&#x2715;</button>""")
+            elif self.base_url: acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
         acts_html = f'<div class="cm-acts-side">{"".join(acts)}</div>' if acts else ""
         bwrap = f'<div class="cm-bwrap">{bubble}</div>'
         if role == "system": return f'<div class="cm-msg cm-sys cm-full" id="cm-msg-{mid}" data-msg-id="{mid}">{bwrap}</div>'
@@ -1168,8 +1163,8 @@ class ChatManager:
         if self.think_toggle: opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="think" value="1"> Think</label>')
         opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="render_md" value="1" checked> Fmt</label>')
         if self.pin_enabled: opts.append(f'<button type="button" class="cm-qbtn cm-pin-on" data-cm-pin="{sid}" title="Pin to bottom">&#x25BC;</button>')
-        opts.append(f"""<button type="button" class="cm-qbtn" onclick="var t=document.getElementById('cm-in-{sid}');if(t)cmCopyText(t.value)" title="Copy inp
-        if self.show_export: opts.append(f"""<button type="button" class="cm-qbtn" onclick="cmCopyConversation('{sid}')" title="Copy conversation">&#x1F4E5;</button>""")n">&#x1F4E5;</button>""")
+        opts.append(f"""<button type="button" class="cm-qbtn" onclick="var t=document.getElementById('cm-in-{sid}');if(t)cmCopyText(t.value)" title="Copy input">&#x2398;</button>""")
+        if self.show_export: opts.append(f"""<button type="button" class="cm-qbtn" onclick="cmCopyConversation('{sid}')" title="Copy conversation">&#x1F4E5;</button>""")
         if extra_footer: opts.append(extra_footer)
         return f"""<div class="cm-footer">
                        <form class="cm-form" data-cm-sid="{sid}" hx-post="/im/in" hx-include="this" hx-swap="none">
@@ -1698,7 +1693,7 @@ class SettingsGroup:
         val = values.get(f.name, f.default)
         hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
         # hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
-        hx_attr = f' hx-post="/im/in" hx-vals=\'{{"type":"{f.hx_intent}"}}\' hx-target="{f.hx_target}" hx-trigger="change" hx-include="closest form"' if (f.hx_intent and f.hx_target) else ""
+        hx_attr = f""" hx-post="/im/in" hx-vals='{{"type":"{f.hx_intent}"}}' hx-target="{f.hx_target}" hx-trigger="change" hx-include='closest form'""" if (f.hx_intent and f.hx_target) else ""
         fname = f"{name_prefix}{f.name}"
         if f.type == "select":
             opts = "".join(f'<option value="{html.escape(str(v))}" {"selected" if str(val)==str(v) else ""}>{html.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in f.get_options(values)))
@@ -2451,7 +2446,7 @@ def shadow_review_html(shadow, intent_type: str, extra_vals: dict = None, list_i
     for e in pend:
         rp = e["path"]; did = f"shadow-diff-{abs(hash(rp))%99999}"
         def _vals(action, rp=rp, did=did): return json.dumps({"type": intent_type, "action": action, "path": rp, "diff_target": did, **(extra_vals or {})})
-        diff_btn = "" if e.get("kind")=="binary" else f'<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals=\'{_vals("diff")}\'>Diff</button>'
+        diff_btn = "" if e.get("kind")=="binary" else f"""<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("diff")}'>Diff</button>"""
         size_note = f'<span style="font-size:.6rem;color:var(--text_muted)">{e.get("size",0)//1024} KB</span>' if e.get("kind")=="binary" else ""
         rows += f"""<div class="glass" style="padding:.5rem .7rem;margin-bottom:.3rem">
             <div style="display:flex;align-items:center;gap:.4rem">
