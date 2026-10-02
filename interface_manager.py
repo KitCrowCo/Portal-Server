@@ -349,6 +349,7 @@ async def handle_intent_route(request: Request) -> HTMLResponse:
         intent_type = body.get("type", "")
         lvl = int(body.get("lvl", 1))   # default 1 - 0 is last resort
         branch = body.get("branch", "")
+        print(f"""[IM] in type={intent_type} lvl={lvl} branch={branch[:8]} user={getattr(request.state.user, "username", None)} fields={[k for k in body if k not in ("type", "lvl", "branch", "t")]}""", flush=True)
         target_im = None
         # Exact branch match (any level, highest specificity)
         if branch:
