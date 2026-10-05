@@ -304,7 +304,13 @@ const IB = (() => {
             case 'cfg': { Object.assign(_cfg, d.values || {}); _vpSetActive(_cfg.pointer); break; }
 
             case 'pipeline_event': { document.dispatchEvent(new CustomEvent('pipeline:' + d.event, { detail: { job_id: d.job_id, ...d.payload } })); break; }
-            case 'pipeline_stream': { document.dispatchEvent(new CustomEvent('pipeline:stream', { detail: { job_id: d.job_id, node: d.node, key: d.key, delta: d.delta } })); break; }
+            case 'pipeline_stream': {
+                document.dispatchEvent(new CustomEvent('pipeline:stream', { detail: { job_id: d.job_id, node: d.node, key: d.key, delta: d.delta } }));
+                // Server-rendered live views opt in declaratively: any element with data-stream-job + data-stream-node receives the text deltas, so no module needs its own listener.
+                document.querySelectorAll(`[data-stream-job="${d.job_id}"][data-stream-node="${d.node}"]`).forEach(el => { el.textContent += d.delta; el.scrollTop = el.scrollHeight; });
+                break;
+            }
+
         }
     }
     // -- Component Generation --

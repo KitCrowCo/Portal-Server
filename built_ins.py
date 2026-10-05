@@ -145,7 +145,7 @@ def _extract_tabsets(lines: list[str]) -> tuple[list[str], list[dict]]:
         records.append({**top, "end": len(lines), "body": lines[top["start"]+1:]})
     return out, records
 
-MD_BLOCK_CSS = r"""
+MD_BLOCK_CSS = """
 .graphviz-wrapper{background:transparent;max-width:100%;overflow:auto;}
 .graphviz-wrapper svg{max-width:100%;height:auto;display:block;}
 .md-details{border:var(--border-thick) solid var(--border);border-radius:var(--radius);margin:.5rem 0;overflow:hidden;}
@@ -206,7 +206,7 @@ MD_CODE_MIRROR_INIT_JS = """
 # Opt-in: after creating a CodeMirror instance over markdown content, call MD_LIVE.attach(cmInstance) in JS.
 # Pair with MD_LIVE_CSS (inject once via extra_css). Intentionally partial - bold/italic/heading/code/link only.
 
-MD_LIVE_EDIT_INIT_JS = """
+MD_LIVE_EDIT_INIT_JS = r"""
 (function(){
     function initLiveEdit(root){
         (root||document).querySelectorAll('.editor-shell[id]').forEach(function(shell){
@@ -241,7 +241,7 @@ MD_LIVE_EDIT_INIT_JS = """
 })();
 """
 
-MD_LIVE_OVERLAY_JS = """
+MD_LIVE_OVERLAY_JS = r"""
 const MD_LIVE = (() => {
     function overlay() {
         return {
@@ -959,6 +959,125 @@ CHAT_CSS = """
 .cm-unread-dot{width:.45rem;height:.45rem;border-radius:50%;background:var(--accent);flex-shrink:0;display:inline-block;}
 """
 
+CHAT_VOICE_CSS = """
+.cm-audio{display:block;width:100%;max-width:22rem;height:2rem;margin-top:.3rem;}
+.cm-mic,.cm-call{touch-action:none;user-select:none;-webkit-user-select:none;}
+.cm-mic.active,.cm-call.active{background:var(--accent);color:var(--bg);}
+.cm-vad{font-size:.65rem;color:var(--text_muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:12rem;}
+"""
+
+# Voice for ChatManager (enabled per instance with voice=True): hold-to-talk and hands-free call mode, one shared script for every chat surface.
+# Audio stays in the browser until an utterance ends, then goes to the chat's audio intent as a 16 kHz mono WAV data URL ({cid, audio_b64}).
+# Detection runs on 20 ms frames: energy in the 300-3400 Hz speech band (browser biquad filters) against an adaptive noise floor set by a short calibration, with start/end hysteresis and a pre-roll buffer so first syllables survive.
+# The mic is opened with the browser's echo cancellation, so the assistant's own voice does not trigger it; speech while a reply is playing (stricter threshold) pauses the reply and presses the chat's Stop button, then records.
+# Raw string: the JS must reach the browser byte for byte.
+CHAT_VOICE_JS = r"""
+window.cmVoice = window.cmVoice || (function(){
+    var WORKLET = "class P extends AudioWorkletProcessor{constructor(){super();this.n=0;this.a=new Float32Array(Math.round(sampleRate*0.02));this.b=new Float32Array(this.a.length)}process(i){var x=i[0];if(!x||!x[0])return true;var r=x[0],f=x[1]||x[0];for(var k=0;k<r.length;k++){this.a[this.n]=r[k];this.b[this.n]=f[k];if(++this.n===this.a.length){this.port.postMessage([this.a.slice(0),this.b.slice(0)]);this.n=0}}return true}}registerProcessor('cm-frames',P)";
+    var M = null, S = null, playing = new Set();
+    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500};
+
+    document.addEventListener('play', function(e){ if (e.target.classList && e.target.classList.contains('cm-audio')) playing.add(e.target); }, true);
+    ['pause', 'ended', 'emptied'].forEach(function(n){ document.addEventListener(n, function(e){ playing.delete(e.target); }, true); });
+
+    function opt(k){ return (S && S.cfg[k] !== undefined && S.cfg[k] !== null && S.cfg[k] !== '') ? Number(S.cfg[k]) : D[k]; }
+    function show(t, sid){ var el = document.getElementById('cm-vad-' + (sid || (S && S.cfg.sid))); if (el) el.textContent = t; }
+    function db(x){ var s = 0; for (var i = 0; i < x.length; i++) s += x[i] * x[i]; return 10 * Math.log10(s / x.length + 1e-12); }
+
+    async function mic(){
+        if (M) return M;
+        var stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1}});
+        var ctx = new AudioContext();
+        await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], {type: 'application/javascript'})));
+        var src = ctx.createMediaStreamSource(stream), f = function(t, hz){ var b = ctx.createBiquadFilter(); b.type = t; b.frequency.value = hz; return b; };
+        var aa = f('lowpass', 7000), hp = f('highpass', 300), lp = f('lowpass', 3400), merge = ctx.createChannelMerger(2), mute = ctx.createGain();
+        src.connect(aa); aa.connect(merge, 0, 0);                 // channel 0: what gets sent (band-limited for the 16 kHz resample)
+        src.connect(hp); hp.connect(lp); lp.connect(merge, 0, 1); // channel 1: speech band, detection only
+        var node = new AudioWorkletNode(ctx, 'cm-frames', {numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit'});
+        mute.gain.value = 0; merge.connect(node); node.connect(mute); mute.connect(ctx.destination);   // a silent sink keeps the worklet scheduled
+        node.port.onmessage = function(e){ frame(e.data[0], e.data[1]); };
+        M = {stream: stream, ctx: ctx, rate: ctx.sampleRate, cal: Math.ceil(D.calib_ms / 20), fs: 0, fn: 0, floor: -90};
+        return M;
+    }
+
+    function close(){ if (!M) return; M.stream.getTracks().forEach(function(t){ t.stop(); }); M.ctx.close(); M = null; }
+
+    function frame(raw, band){
+        if (S && !document.body.contains(S.btn)) { var sid = S.cfg.sid; S = null; close(); show('', sid); return; }   // the chat was re-rendered or closed
+        if (S && S.mode === 'hold') S.rec.push(raw);
+        var e = db(band);
+        if (M.cal > 0) { M.fs += e; M.fn++; M.floor = M.fs / M.fn; if (--M.cal === 0 && S && S.mode === 'call') show('listening'); return; }
+        var speech = e > M.floor + opt('threshold_db') + (playing.size ? opt('bargein_db') : 0) && e > opt('min_db');
+        M.floor = e < M.floor ? M.floor * 0.9 + e * 0.1 : M.floor + (speech ? 0.0002 : 0.01) * (e - M.floor);   // falls fast to quiet, creeps up slowly, barely moves during speech
+        if (!S || S.mode !== 'call') return;
+        S.pre.push(raw); while (S.pre.length > Math.ceil(opt('preroll_ms') / 20)) S.pre.shift();
+        if (S.state === 'listening') {
+            S.above = speech ? S.above + 1 : 0;
+            if (S.above >= Math.ceil(opt('start_ms') / 20)) { if (playing.size) bargeIn(); S.state = 'speaking'; S.rec = S.pre.slice(); S.below = 0; show('hearing you'); }
+        } else {
+            S.rec.push(raw); S.below = speech ? 0 : S.below + 1;
+            if (S.below >= Math.ceil(opt('end_ms') / 20) || S.rec.length * 20 >= opt('max_ms')) { send(S.rec.slice(0, S.rec.length - Math.max(0, S.below - 10))); S.rec = []; S.state = 'listening'; S.above = 0; }
+        }
+    }
+
+    function bargeIn(){
+        playing.forEach(function(a){ a.pause(); });
+        var shell = S.btn.closest('.cm-shell'), stop = shell && shell.querySelector('.cm-working.cm-on [hx-post]');
+        if (stop) stop.click();
+    }
+
+    function send(frames){
+        var n = frames.reduce(function(a, f){ return a + f.length; }, 0);
+        if (n < M.rate * 0.3) { show('too short - keep talking a little longer'); return; }
+        var x = new Float32Array(n), o = 0;
+        frames.forEach(function(f){ x.set(f, o); o += f.length; });
+        show(S.mode === 'call' ? 'sent - listening' : 'sent');
+        htmx.ajax('POST', '/im/in', {values: {type: S.cfg.intent, cid: S.cfg.sid, branch: S.cfg.branch, lvl: S.cfg.lvl, audio_b64: wav(x, M.rate)}, swap: 'none'});
+    }
+
+    function wav(x, rate){
+        var out = 16000, len = Math.floor(x.length * out / rate), b = new DataView(new ArrayBuffer(44 + len * 2));
+        var s = function(o, str){ for (var i = 0; i < str.length; i++) b.setUint8(o + i, str.charCodeAt(i)); };
+        s(0, 'RIFF'); b.setUint32(4, 36 + len * 2, true); s(8, 'WAVE'); s(12, 'fmt '); b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true);
+        b.setUint32(24, out, true); b.setUint32(28, out * 2, true); b.setUint16(32, 2, true); b.setUint16(34, 16, true); s(36, 'data'); b.setUint32(40, len * 2, true);
+        for (var i = 0; i < len; i++) { var p = i * rate / out, j = Math.floor(p), t = p - j, v = (x[j] || 0) * (1 - t) + (x[j + 1] || 0) * t; b.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 32767, true); }
+        var bytes = new Uint8Array(b.buffer), bin = '';
+        for (var m = 0; m < bytes.length; m += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(m, m + 0x8000));
+        return 'data:audio/wav;base64,' + btoa(bin);
+    }
+
+    function fail(e, sid){ show(e && e.name === 'NotAllowedError' ? 'mic blocked - allow it in the browser' : 'mic unavailable (' + (e && e.name) + ') - needs https or localhost', sid); }
+
+    async function hold(btn, ev){
+        ev.preventDefault();
+        if (S) return;
+        var c = JSON.parse(btn.dataset.cmVoice);
+        S = {cfg: c, btn: btn, mode: 'hold', rec: [], pre: [], held: true}; btn.classList.add('active'); show('opening mic', c.sid);
+        try { await mic(); } catch (e) { fail(e, c.sid); S = null; btn.classList.remove('active'); return; }
+        if (!S || !S.held) { close(); return; }
+        show('listening - release to send');
+    }
+
+    function release(btn){
+        if (!S || S.mode !== 'hold' || !S.held) return;
+        S.held = false; btn.classList.remove('active');
+        if (M) send(S.rec);
+        S = null; close();
+    }
+
+    async function toggleCall(btn){
+        var c = JSON.parse(btn.dataset.cmVoice);
+        if (S && S.mode === 'call') { S = null; btn.classList.remove('active'); close(); show('', c.sid); return; }
+        if (S) return;
+        S = {cfg: c, btn: btn, mode: 'call', state: 'listening', rec: [], pre: [], above: 0, below: 0}; btn.classList.add('active'); show('opening mic', c.sid);
+        try { await mic(); } catch (e) { fail(e, c.sid); S = null; btn.classList.remove('active'); return; }
+        if (M.cal > 0) show('stay quiet a moment - measuring the room');
+    }
+
+    return {hold: hold, release: release, toggleCall: toggleCall};
+})();
+"""
+
 CHAT_SCRIPT = """
 function cmCopyText(text) {
     if (!text) { cmToast('Nothing to copy'); return; }
@@ -1047,7 +1166,7 @@ class ChatManager:
     @property
     def CSS(self): return (CHAT_CSS + f""".cm-me .cm-bubble{{background:var(--rp-bubble-me-bg, {self.bubble_me_bg});border-color:var(--rp-bubble-me-border, {self.bubble_me_border});}}.cm-other .cm-bubble{{background:var(--rp-bubble-other-bg, {self.bubble_other_bg});border-color:var(--rp-bubble-other-border, {self.bubble_other_border});}}""")
 
-    SCRIPT = CHAT_SCRIPT
+    SCRIPT = CHAT_SCRIPT + CHAT_VOICE_JS   # the voice script is inert unless a chat renders voice controls
 
     def __init__(self, **kwargs):
         self.namespace = kwargs.get('namespace', "chat")
@@ -1092,18 +1211,20 @@ class ChatManager:
         self.nesting_level = kwargs.get('nesting_level', 1)
         self.IM = kwargs.get('IM', None)
         self.intent_name = kwargs.get('intent_name', "submit")
+        self.voice = kwargs.get('voice', False)                                     # footer mic: hold-to-talk + hands-free call mode (the browser allows the mic on https or localhost only)
+        self.audio_intent = kwargs.get('audio_intent', f"{self.namespace}_audio")   # intent each finished utterance is posted to: {cid, audio_b64 = 16 kHz mono WAV data URL}
         if self.IM is not None and kwargs.get('on_submit'): self.IM.scripts[self.intent_name] = [kwargs['on_submit']]
 
     @property
-    def CSS(self): return (CHAT_CSS + f""".cm-me .cm-bubble{{background:{self.bubble_me_bg};border-color:{self.bubble_me_border};}}.cm-other .cm-bubble{{background:{self.bubble_other_bg};border-color:{self.bubble_other_border};}}""")
+    def CSS(self): return (CHAT_CSS + CHAT_VOICE_CSS + f""".cm-me .cm-bubble{{background:{self.bubble_me_bg};border-color:{self.bubble_me_border};}}.cm-other .cm-bubble{{background:{self.bubble_other_bg};border-color:{self.bubble_other_border};}}""")
 
-    def shell(self, sid, messages=None, user=None, header_html="", extra_footer="", sprites=None, viewer_name="", room_owner="", is_working=False, partial_content="", partial_thinking="", owns_conversation=False, stop_intent=""):
+    def shell(self, sid, messages=None, user=None, header_html="", extra_footer="", sprites=None, viewer_name="", room_owner="", is_working=False, partial_content="", partial_thinking="", owns_conversation=False, stop_intent="", voice_opts=None):
         style_cls = f"cm-s-{self.view_style}"
         no_in_cls = " cm-no-input" if not self.input_enabled else ""
         vname = viewer_name or (user.username if user else "")
         msgs_html = self.render_messages(messages, vname, user, sprites, room_owner, owns_conversation) if messages is not None else '<div class="cm-empty">No messages yet.</div>'
         hdr = f'<div class="cm-header">{header_html}</div>' if header_html else ""
-        footer = self._footer_html(sid, extra_footer) if self.input_enabled or extra_footer else ""
+        footer = self._footer_html(sid, extra_footer, voice_opts) if self.input_enabled or extra_footer else ""
         if is_working: work_html = self.working_html(sid, stop_intent).replace(' hx-swap-oob="outerHTML"', '')
         else: work_html = f'<div id="cm-work-{sid}" class="cm-working"></div>'
         if partial_content or partial_thinking: stream_html = self.stream_content_html(sid, partial_content, partial_thinking).replace(' hx-swap-oob="innerHTML"', 'class="cm-stream"')
@@ -1140,7 +1261,9 @@ class ChatManager:
         meta_right = " ".join(filter(None, [ts] + info_parts + ([tok_count] if tok_count else [])))
         edited = ' <span style="opacity:.5;font-size:.58rem">(edited)</span>' if msg.get("edited") else ""
         meta = f'<div class="cm-meta">{meta_left}{" - " if meta_left and meta_right else ""}{meta_right}{edited}</div>' if (meta_left or meta_right) else ""
-        bubble = f'<div class="cm-bubble" id="cm-bubble-{mid}" data-raw="{UI.escape(content_raw)}">{meta}<div class="cm-content">{content}</div>{think_html}</div>' # data-raw stores original markdown for copy
+        audio = msg.get("audio") or {}   # {"url", "autoplay"?}: native player = replay; autoplay is set only on the freshly pushed copy, never stored
+        audio_html = f"""<audio class="cm-audio" controls preload="none" {"autoplay" if audio.get("autoplay") else ""} src="{UI.escape(audio["url"])}"></audio>""" if audio.get("url") else ""
+        bubble = f"""<div class="cm-bubble" id="cm-bubble-{mid}" data-raw="{UI.escape(content_raw)}">{meta}<div class="cm-content">{content}</div>{audio_html}{think_html}</div>""" # data-raw stores original markdown for copy
         acts = []
         if self.allow_copy and mid: acts.append(f"""<button class="cm-act" onclick="cmCopyText(document.getElementById('cm-bubble-{mid}').dataset.raw||'')" title="Copy markdown">&#x2398;</button>""")
         if can_edit and self.allow_edit and mid:
@@ -1157,7 +1280,12 @@ class ChatManager:
         role_cls = "cm-me" if is_me else "cm-other"
         return f'<div class="cm-msg {role_cls}" id="cm-msg-{mid}" data-msg-id="{mid}">{avatar}{bwrap}{acts_html}</div>'
 
-    def _footer_html(self, sid, extra_footer=""):
+    def _voice_html(self, sid, voice_opts=None) -> str:
+        """Mic controls for the footer. voice_opts tunes call-mode detection per conversation (threshold_db, bargein_db, min_db, start_ms, end_ms, preroll_ms, max_ms); unset keys use the script defaults."""
+        cfg = UI.escape(json.dumps({"sid": sid, "intent": self.audio_intent, "branch": self.branch_id, "lvl": self.nesting_level, **{k: v for k, v in (voice_opts or {}).items() if v not in (None, "")}}))
+        return f"""<button type="button" class="cm-qbtn cm-mic" data-cm-voice="{cfg}" onpointerdown="cmVoice.hold(this, event)" onpointerup="cmVoice.release(this)" onpointerleave="cmVoice.release(this)" onpointercancel="cmVoice.release(this)" oncontextmenu="return false" title="Hold to talk">&#x1F3A4;</button><button type="button" class="cm-qbtn cm-call" data-cm-voice="{cfg}" onpointerdown="cmVoice.toggleCall(this)" title="Call mode: talk hands-free; speaking over a reply interrupts it">&#x260E;</button><span class="cm-vad" id="cm-vad-{sid}"></span>"""
+
+    def _footer_html(self, sid, extra_footer="", voice_opts=None):
         opts = []
         if self.stream_toggle: opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="stream" value="1" checked> Stream</label>')
         if self.think_toggle: opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="think" value="1"> Think</label>')
@@ -1165,6 +1293,7 @@ class ChatManager:
         if self.pin_enabled: opts.append(f'<button type="button" class="cm-qbtn cm-pin-on" data-cm-pin="{sid}" title="Pin to bottom">&#x25BC;</button>')
         opts.append(f"""<button type="button" class="cm-qbtn" onclick="var t=document.getElementById('cm-in-{sid}');if(t)cmCopyText(t.value)" title="Copy input">&#x2398;</button>""")
         if self.show_export: opts.append(f"""<button type="button" class="cm-qbtn" onclick="cmCopyConversation('{sid}')" title="Copy conversation">&#x1F4E5;</button>""")
+        if self.voice: opts.append(self._voice_html(sid, voice_opts))
         if extra_footer: opts.append(extra_footer)
         return f"""<div class="cm-footer">
                        <form class="cm-form" data-cm-sid="{sid}" hx-post="/im/in" hx-include="this" hx-swap="none">
@@ -1669,9 +1798,14 @@ class SettingsGroup:
 
     def save(self, form_data: dict):
         self.json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.json_path, 'w', encoding='utf-8') as f:
+            json.dump(self.parse(form_data), f, indent=2)
+
+    def parse(self, form_data: dict, name_prefix: str = "") -> dict:
+        """Form values -> typed settings dict (checkbox -> bool, number -> int/float, json -> dict/list), the same rules save() persists with. For callers that store settings somewhere other than this group's own json_path."""
         data = {}
         for f in self.fields:
-            raw = form_data.get(f.name)
+            raw = form_data.get(f"{name_prefix}{f.name}")
             if f.type == "checkbox":
                 data[f.name] = bool(raw)
             elif f.type == "number":
@@ -1686,8 +1820,7 @@ class SettingsGroup:
                     except Exception: data[f.name] = f.default or {}
             else:
                 data[f.name] = raw if raw is not None else f.default
-        with open(self.json_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
+        return data
 
     def _render_field(self, f, values: dict, fm=None, name_prefix: str = "") -> str:
         val = values.get(f.name, f.default)
