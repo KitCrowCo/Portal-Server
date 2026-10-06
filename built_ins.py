@@ -968,21 +968,45 @@ CHAT_VOICE_CSS = """
 
 # Voice for ChatManager (enabled per instance with voice=True): hold-to-talk and hands-free call mode, one shared script for every chat surface.
 # Audio stays in the browser until an utterance ends, then goes to the chat's audio intent as a 16 kHz mono WAV data URL ({cid, audio_b64}).
-# Detection runs on 20 ms frames: energy in the 300-3400 Hz speech band (browser biquad filters) against an adaptive noise floor set by a short calibration, with start/end hysteresis and a pre-roll buffer so first syllables survive.
-# The mic is opened with the browser's echo cancellation, so the assistant's own voice does not trigger it; speech while a reply is playing (stricter threshold) pauses the reply and presses the chat's Stop button, then records.
+# Detection runs on 20 ms frames of the 300-3400 Hz speech band (browser biquad filters):
+#   - energy against an adaptive noise floor set by a short calibration (is something there),
+#   - periodicity of that band (is it a voice): normalized autocorrelation over 70-400 Hz pitch periods; noise, clicks and hum score low,
+#   - an utterance starts after start_ms of energy with at least half its frames voiced, ends after end_ms of quiet, and is sent only if it held
+#     min_voiced_ms of voiced frames - anything less is dropped in the browser and never reaches the server.
+# The mic uses the browser's echo cancellation. While a reply plays, starting needs the stricter barge-in margin held for bargein_ms; the reply is then
+# paused, not stopped. If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply
+# resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
 # Raw string: the JS must reach the browser byte for byte.
 CHAT_VOICE_JS = r"""
 window.cmVoice = window.cmVoice || (function(){
     var WORKLET = "class P extends AudioWorkletProcessor{constructor(){super();this.n=0;this.a=new Float32Array(Math.round(sampleRate*0.02));this.b=new Float32Array(this.a.length)}process(i){var x=i[0];if(!x||!x[0])return true;var r=x[0],f=x[1]||x[0];for(var k=0;k<r.length;k++){this.a[this.n]=r[k];this.b[this.n]=f[k];if(++this.n===this.a.length){this.port.postMessage([this.a.slice(0),this.b.slice(0)]);this.n=0}}return true}}registerProcessor('cm-frames',P)";
-    var M = null, S = null, playing = new Set();
-    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500};
+    var M = null, S = null, P = null, playing = new Set();
+    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500, voicing: 0.45, min_voiced_ms: 250, bargein_ms: 400};
 
     document.addEventListener('play', function(e){ if (e.target.classList && e.target.classList.contains('cm-audio')) playing.add(e.target); }, true);
     ['pause', 'ended', 'emptied'].forEach(function(n){ document.addEventListener(n, function(e){ playing.delete(e.target); }, true); });
+    document.addEventListener('cm-voice', function(e){ var d = e.detail || {}; if (!P || P.sid !== d.sid) return; if (!d.heard) { resume(P.els); show('nothing heard - reply resumed', d.sid); } P = null; });   // server verdict on the last sent utterance that paused a reply
 
     function opt(k){ return (S && S.cfg[k] !== undefined && S.cfg[k] !== null && S.cfg[k] !== '') ? Number(S.cfg[k]) : D[k]; }
     function show(t, sid){ var el = document.getElementById('cm-vad-' + (sid || (S && S.cfg.sid))); if (el) el.textContent = t; }
     function db(x){ var s = 0; for (var i = 0; i < x.length; i++) s += x[i] * x[i]; return 10 * Math.log10(s / x.length + 1e-12); }
+    function frames(ms){ return Math.ceil(ms / 20); }
+
+    function voicing(x){
+        // Peak normalized autocorrelation over pitch periods 70-400 Hz, on the band channel decimated to ~16 kHz (it is already low-passed at 3.4 kHz).
+        var d = Math.max(1, Math.round(M.rate / 16000)), n = Math.floor(x.length / d), y = new Float32Array(n), m = 0, i, lag, best = 0;
+        for (i = 0; i < n; i++) { y[i] = x[i * d]; m += y[i]; }
+        m /= n;
+        for (i = 0; i < n; i++) y[i] -= m;
+        var sr = M.rate / d, lo = Math.floor(sr / 400), hi = Math.min(Math.ceil(sr / 70), n - Math.floor(n / 3));
+        for (lag = lo; lag <= hi; lag++) {
+            var s = 0, ea = 0, eb = 0;
+            for (i = 0; i + lag < n; i++) { s += y[i] * y[i + lag]; ea += y[i] * y[i]; eb += y[i + lag] * y[i + lag]; }
+            var r = s / Math.sqrt(ea * eb + 1e-12);
+            if (r > best) best = r;
+        }
+        return best;
+    }
 
     async function mic(){
         if (M) return M;
@@ -996,41 +1020,55 @@ window.cmVoice = window.cmVoice || (function(){
         var node = new AudioWorkletNode(ctx, 'cm-frames', {numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit'});
         mute.gain.value = 0; merge.connect(node); node.connect(mute); mute.connect(ctx.destination);   // a silent sink keeps the worklet scheduled
         node.port.onmessage = function(e){ frame(e.data[0], e.data[1]); };
-        M = {stream: stream, ctx: ctx, rate: ctx.sampleRate, cal: Math.ceil(D.calib_ms / 20), fs: 0, fn: 0, floor: -90};
+        M = {stream: stream, ctx: ctx, rate: ctx.sampleRate, cal: frames(D.calib_ms), fs: 0, fn: 0, floor: -90};
         return M;
     }
 
     function close(){ if (!M) return; M.stream.getTracks().forEach(function(t){ t.stop(); }); M.ctx.close(); M = null; }
 
+    function pauseAll(){ var els = Array.from(playing); els.forEach(function(a){ a.pause(); }); return els; }
+    function resume(els){ (els || []).forEach(function(a){ if (a.isConnected && a.paused && !a.ended) { var p = a.play(); if (p && p.catch) p.catch(function(){}); } }); }
+
     function frame(raw, band){
-        if (S && !document.body.contains(S.btn)) { var sid = S.cfg.sid; S = null; close(); show('', sid); return; }   // the chat was re-rendered or closed
+        if (S && !document.body.contains(S.btn)) { var sid = S.cfg.sid; resume(S.paused); S = null; close(); show('', sid); return; }   // the chat was re-rendered or closed
         if (S && S.mode === 'hold') S.rec.push(raw);
         var e = db(band);
         if (M.cal > 0) { M.fs += e; M.fn++; M.floor = M.fs / M.fn; if (--M.cal === 0 && S && S.mode === 'call') show('listening'); return; }
-        var speech = e > M.floor + opt('threshold_db') + (playing.size ? opt('bargein_db') : 0) && e > opt('min_db');
+        var guard = playing.size > 0 && !(S && S.state === 'speaking');   // a reply is playing and we are not yet in an utterance: barge-in rules apply
+        var speech = e > M.floor + opt('threshold_db') + (guard ? opt('bargein_db') : 0) && e > opt('min_db');
+        var voiced = speech && voicing(band) >= opt('voicing');
         M.floor = e < M.floor ? M.floor * 0.9 + e * 0.1 : M.floor + (speech ? 0.0002 : 0.01) * (e - M.floor);   // falls fast to quiet, creeps up slowly, barely moves during speech
         if (!S || S.mode !== 'call') return;
-        S.pre.push(raw); while (S.pre.length > Math.ceil(opt('preroll_ms') / 20)) S.pre.shift();
+        S.pre.push(raw); while (S.pre.length > frames(Math.max(opt('preroll_ms'), opt('start_ms') + 200, opt('bargein_ms') + 200))) S.pre.shift();
         if (S.state === 'listening') {
-            S.above = speech ? S.above + 1 : 0;
-            if (S.above >= Math.ceil(opt('start_ms') / 20)) { if (playing.size) bargeIn(); S.state = 'speaking'; S.rec = S.pre.slice(); S.below = 0; show('hearing you'); }
+            S.above = speech ? S.above + 1 : 0; S.vrun = speech ? S.vrun + (voiced ? 1 : 0) : 0;
+            if (S.above >= frames(opt(guard ? 'bargein_ms' : 'start_ms')) && S.vrun * 2 >= S.above) {
+                S.paused = guard ? pauseAll() : []; S.state = 'speaking'; S.rec = S.pre.slice(); S.below = 0; S.voiced = S.vrun;
+                show(S.paused.length ? 'interrupting - reply paused' : 'hearing you');
+            }
         } else {
-            S.rec.push(raw); S.below = speech ? 0 : S.below + 1;
-            if (S.below >= Math.ceil(opt('end_ms') / 20) || S.rec.length * 20 >= opt('max_ms')) { send(S.rec.slice(0, S.rec.length - Math.max(0, S.below - 10))); S.rec = []; S.state = 'listening'; S.above = 0; }
+            S.rec.push(raw); S.below = speech ? 0 : S.below + 1; if (voiced) S.voiced++;
+            if (S.below >= frames(opt('end_ms')) || S.rec.length * 20 >= opt('max_ms')) finish();
         }
     }
 
-    function bargeIn(){
-        playing.forEach(function(a){ a.pause(); });
-        var shell = S.btn.closest('.cm-shell'), stop = shell && shell.querySelector('.cm-working.cm-on [hx-post]');
-        if (stop) stop.click();
+    function finish(){
+        var rec = S.rec.slice(0, S.rec.length - Math.max(0, S.below - 10)), paused = S.paused, voicedMs = S.voiced * 20;
+        S.rec = []; S.state = 'listening'; S.above = 0; S.vrun = 0; S.paused = [];
+        if (voicedMs < opt('min_voiced_ms')) { resume(paused); show('ignored - no clear speech'); return; }
+        if (paused.length) {
+            var shell = S.btn.closest('.cm-shell'), stop = shell && shell.querySelector('.cm-working.cm-on [hx-post]');
+            if (stop) stop.click();
+            P = {sid: S.cfg.sid, els: paused};
+        }
+        send(rec);
     }
 
-    function send(frames){
-        var n = frames.reduce(function(a, f){ return a + f.length; }, 0);
+    function send(frames_){
+        var n = frames_.reduce(function(a, f){ return a + f.length; }, 0);
         if (n < M.rate * 0.3) { show('too short - keep talking a little longer'); return; }
         var x = new Float32Array(n), o = 0;
-        frames.forEach(function(f){ x.set(f, o); o += f.length; });
+        frames_.forEach(function(f){ x.set(f, o); o += f.length; });
         show(S.mode === 'call' ? 'sent - listening' : 'sent');
         htmx.ajax('POST', '/im/in', {values: {type: S.cfg.intent, cid: S.cfg.sid, branch: S.cfg.branch, lvl: S.cfg.lvl, audio_b64: wav(x, M.rate)}, swap: 'none'});
     }
@@ -1052,7 +1090,7 @@ window.cmVoice = window.cmVoice || (function(){
         ev.preventDefault();
         if (S) return;
         var c = JSON.parse(btn.dataset.cmVoice);
-        S = {cfg: c, btn: btn, mode: 'hold', rec: [], pre: [], held: true}; btn.classList.add('active'); show('opening mic', c.sid);
+        S = {cfg: c, btn: btn, mode: 'hold', rec: [], pre: [], held: true, paused: []}; btn.classList.add('active'); show('opening mic', c.sid);
         try { await mic(); } catch (e) { fail(e, c.sid); S = null; btn.classList.remove('active'); return; }
         if (!S || !S.held) { close(); return; }
         show('listening - release to send');
@@ -1067,9 +1105,9 @@ window.cmVoice = window.cmVoice || (function(){
 
     async function toggleCall(btn){
         var c = JSON.parse(btn.dataset.cmVoice);
-        if (S && S.mode === 'call') { S = null; btn.classList.remove('active'); close(); show('', c.sid); return; }
+        if (S && S.mode === 'call') { resume(S.paused); S = null; btn.classList.remove('active'); close(); show('', c.sid); return; }
         if (S) return;
-        S = {cfg: c, btn: btn, mode: 'call', state: 'listening', rec: [], pre: [], above: 0, below: 0}; btn.classList.add('active'); show('opening mic', c.sid);
+        S = {cfg: c, btn: btn, mode: 'call', state: 'listening', rec: [], pre: [], above: 0, vrun: 0, below: 0, voiced: 0, paused: []}; btn.classList.add('active'); show('opening mic', c.sid);
         try { await mic(); } catch (e) { fail(e, c.sid); S = null; btn.classList.remove('active'); return; }
         if (M.cal > 0) show('stay quiet a moment - measuring the room');
     }
@@ -1077,6 +1115,7 @@ window.cmVoice = window.cmVoice || (function(){
     return {hold: hold, release: release, toggleCall: toggleCall};
 })();
 """
+
 
 CHAT_SCRIPT = """
 function cmCopyText(text) {
@@ -1281,7 +1320,7 @@ class ChatManager:
         return f'<div class="cm-msg {role_cls}" id="cm-msg-{mid}" data-msg-id="{mid}">{avatar}{bwrap}{acts_html}</div>'
 
     def _voice_html(self, sid, voice_opts=None) -> str:
-        """Mic controls for the footer. voice_opts tunes call-mode detection per conversation (threshold_db, bargein_db, min_db, start_ms, end_ms, preroll_ms, max_ms); unset keys use the script defaults."""
+        """Mic controls for the footer. voice_opts tunes call-mode detection per conversation (threshold_db, bargein_db, bargein_ms, min_db, start_ms, end_ms, preroll_ms, min_voiced_ms, voicing, max_ms); unset keys use the script defaults. The audio intent's owner may push a `cm-voice` trigger {sid, heard} after transcribing: heard=false resumes a reply the utterance paused."""
         cfg = UI.escape(json.dumps({"sid": sid, "intent": self.audio_intent, "branch": self.branch_id, "lvl": self.nesting_level, **{k: v for k, v in (voice_opts or {}).items() if v not in (None, "")}}))
         return f"""<button type="button" class="cm-qbtn cm-mic" data-cm-voice="{cfg}" onpointerdown="cmVoice.hold(this, event)" onpointerup="cmVoice.release(this)" onpointerleave="cmVoice.release(this)" onpointercancel="cmVoice.release(this)" oncontextmenu="return false" title="Hold to talk">&#x1F3A4;</button><button type="button" class="cm-qbtn cm-call" data-cm-voice="{cfg}" onpointerdown="cmVoice.toggleCall(this)" title="Call mode: talk hands-free; speaking over a reply interrupts it">&#x260E;</button><span class="cm-vad" id="cm-vad-{sid}"></span>"""
 
