@@ -206,21 +206,23 @@ MD_CODE_MIRROR_INIT_JS = """
 # Opt-in: after creating a CodeMirror instance over markdown content, call MD_LIVE.attach(cmInstance) in JS.
 # Pair with MD_LIVE_CSS (inject once via extra_css). Intentionally partial - bold/italic/heading/code/link only.
 
-MD_LIVE_EDIT_INIT_JS = r"""
+MD_LIVE_EDIT_INIT_JS = """
 (function(){
-    function initLiveEdit(root){
-        (root||document).querySelectorAll('.editor-shell[id]').forEach(function(shell){
+    // This script can be evaluated more than once per page (a module root re-rendered into the shell); listeners are bound once, later runs only rescan.
+    if (window.__mdLiveEdit) { window.__mdLiveEdit(); return; }
+    function initLiveEdit(){
+        document.querySelectorAll('.editor-shell[id]').forEach(function(shell){
             var did = shell.id.slice('editor-shell-'.length);
-            var ta = document.getElementById('doc-textarea-'+did);
+            var ta = shell.querySelector('#doc-textarea-'+did);
             if (!ta || ta.cm) return;
-            var cm = CodeMirror.fromTextArea(ta, {lineNumbers:false, lineWrapping:true, mode:null, theme:'default'});
+            var cm = CodeMirror.fromTextArea(ta, {lineNumbers:false, lineWrapping:!ta.classList.contains('unwrapped'), mode:'text/plain', theme:'default'});
+            ta.cm = cm;   // claimed before anything else can throw: a textarea is wrapped by exactly one editor
             cm.getWrapperElement().classList.add('cm-live-edit');
             MD_LIVE.attach(cm);
             cm.on('change', function(){
+                if (ta.dataset.dirty === '1') return;
                 ta.dataset.dirty = '1';
-                cm.save();
-                ta.dispatchEvent(new Event('input', {bubbles:true}));
-                ta.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+                document.getElementById('editor-dirty-'+did).style.display = 'inline';
             });
             cm.on('blur', function(){
                 if (ta.dataset.dirty !== '1') return;
@@ -228,43 +230,44 @@ MD_LIVE_EDIT_INIT_JS = r"""
                 htmx.trigger(ta, 'blursave');
                 ta.dataset.dirty = '0';
             });
-            ta.cm = cm;
         });
     }
-    document.addEventListener('htmx:afterSwap', function(e){ initLiveEdit(e.detail.target); });
+    window.__mdLiveEdit = initLiveEdit;
+    document.addEventListener('htmx:afterSettle', function(){ initLiveEdit(); });   // after settle the swapped-in shell is in the document (an outerHTML swap's event target is the old, detached element)
     document.addEventListener('im:tab-flush', function(){
         document.querySelectorAll('textarea[id^="doc-textarea-"]').forEach(function(ta){
             if (ta.cm && ta.dataset.dirty === '1') { ta.cm.save(); htmx.trigger(ta, 'blursave'); ta.dataset.dirty = '0'; }
         });
     });
-    initLiveEdit();
 })();
 """
 
 MD_LIVE_OVERLAY_JS = r"""
-const MD_LIVE = (() => {
+window.MD_LIVE = window.MD_LIVE || (() => {
     function overlay() {
         return {
             startState: function() { return { inFence: false }; },
             token: function(stream, state) {
-                if (stream.sol()) { if (stream.match(/^```/)) { state.inFence = !state.inFence; return 'md-code'; } }
-                if (state.inFence) { stream.skipToEnd(); return 'md-code'; }
-                if (stream.sol()) {
-                    var h = stream.match(/^(#{1,6})\s+/); if (h) { stream.skipToEnd(); return 'md-heading md-h' + h[1].length; }
-                    if (stream.match(/^(---|\*\*\*|___)\s*$/)) { stream.skipToEnd(); return 'md-hr'; }
+                if (stream.sol() && stream.match(/```/)) {
+                    stream.skipToEnd();
+                    state.inFence = !state.inFence;
+                    return "fence";
                 }
-                if (stream.match(/^\*\*[^*\n]+\*\*/)) return 'md-strong';
-                if (stream.match(/^\*[^*\n]+\*/)) return 'md-em';
-                if (stream.match(/^`[^`\n]+`/)) return 'md-code';
-                if (stream.match(/^\[[^\]]*\]\([^)]*\)/)) return 'md-link';
+                if (state.inFence) {
+                    stream.skipToEnd();
+                    return "fence";
+                }
+                if (stream.match(/\*\*[^*]+\*\*/) || stream.match(/__[id]+__/)) return "bold";
+                if (stream.match(/\*[^*]+\*/) || stream.match(/_[^_]+_/)) return "italic";
+                if (stream.match(/`[^`]+`/)) return "code";
                 stream.next();
                 return null;
             }
         };
     }
-    const _overlays = new WeakMap();
-    function attach(cm) { const o = overlay(); _overlays.set(cm, o); cm.addOverlay(o); }
-    function detach(cm) { const o = _overlays.get(cm); if (o) { cm.removeOverlay(o); _overlays.delete(cm); } }
+    const _base = new WeakMap();   // the mode an editor had before attach, restored by detach
+    function attach(cm) { if (_base.has(cm)) return; const m = cm.getOption('mode') || 'text/plain'; _base.set(cm, m); cm.setOption('mode', CodeMirror.overlayMode(CodeMirror.getMode(cm.options, m), overlay())); }   // overlayMode (addon-overlay.js) carries the overlay's state; cm.addOverlay only takes stateless overlays
+    function detach(cm) { if (!_base.has(cm)) return; cm.setOption('mode', _base.get(cm)); _base.delete(cm); }
     return { attach, detach };
 })();
 """
@@ -286,7 +289,7 @@ MD_LIVE_CSS = """
 """
 
 MD_LIVE_EDIT_CSS = """
-.editor-main-container .cm-live-edit.CodeMirror { font-family: var(--font-main) !important; font-size: var(--font-size) !important; flex: 1; width: 100%; height: 100% !important; }
+.editor-main-container .cm-live-edit.CodeMirror { font-family: var(--font-main) !important; font-size: calc(var(--font-size, 1rem) * var(--editor-zoom, 1)) !important; flex: 1; width: 100%; height: 100% !important; }
 .cm-live-edit .CodeMirror-line, .cm-live-edit .CodeMirror-lines { font-family: var(--font-main) !important; }
 .cm-live-edit .CodeMirror-scroll { min-height: 100%; }
 """
@@ -971,21 +974,76 @@ CHAT_VOICE_CSS = """
 # Detection runs on 20 ms frames of the 300-3400 Hz speech band (browser biquad filters):
 #   - energy against an adaptive noise floor set by a short calibration (is something there),
 #   - periodicity of that band (is it a voice): normalized autocorrelation over 70-400 Hz pitch periods; noise, clicks and hum score low,
-#   - an utterance starts after start_ms of energy with at least half its frames voiced, ends after end_ms of quiet, and is sent only if it held
-#     min_voiced_ms of voiced frames - anything less is dropped in the browser and never reaches the server.
-# The mic uses the browser's echo cancellation. While a reply plays, starting needs the stricter barge-in margin held for bargein_ms; the reply is then
-# paused, not stopped. If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply
-# resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
+#   - an utterance starts after start_ms of energy with at least half its frames voiced, ends after end_ms of quiet, and is sent only if it held min_voiced_ms of voiced frames - anything less is dropped in the browser and never reaches the server.
+# Echo, in three layers (a loudspeaker hears its own replies):
+#   1. replies play through a local WebRTC loopback (echo_route), so the browser's echo canceller knows what the speaker plays - it otherwise only knows WebRTC audio, and plain <audio> playback reaches the mic untouched on most platforms;
+#   2. an echo gate (echo_margin_db): while a reply plays, the gap between mic level and speaker output level is learned (the first 300 ms of output only learn), and the mic counts as talking only when it is clearly louder than that learned echo;
+#   3. talkover = 0 ignores the mic entirely while a reply plays (half-duplex).
+# While a reply plays, starting also needs the stricter barge-in margin held for bargein_ms; the reply is then paused, not stopped. 
+# If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
+# Replies spoken while they are written arrive as `cm-voice-audio` triggers {sid, turn, seq, audio_b64, format, text, last}: segments are queued by seq per chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply).
+# A sent utterance that stopped a reply drops the rest of that turn.
 # Raw string: the JS must reach the browser byte for byte.
 CHAT_VOICE_JS = r"""
 window.cmVoice = window.cmVoice || (function(){
     var WORKLET = "class P extends AudioWorkletProcessor{constructor(){super();this.n=0;this.a=new Float32Array(Math.round(sampleRate*0.02));this.b=new Float32Array(this.a.length)}process(i){var x=i[0];if(!x||!x[0])return true;var r=x[0],f=x[1]||x[0];for(var k=0;k<r.length;k++){this.a[this.n]=r[k];this.b[this.n]=f[k];if(++this.n===this.a.length){this.port.postMessage([this.a.slice(0),this.b.slice(0)]);this.n=0}}return true}}registerProcessor('cm-frames',P)";
-    var M = null, S = null, P = null, playing = new Set();
-    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500, voicing: 0.45, min_voiced_ms: 250, bargein_ms: 400};
+    var M = null, S = null, P = null, O = null, playing = new Set(), AQ = {};
+    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500, voicing: 0.45, min_voiced_ms: 250, bargein_ms: 400, echo_margin_db: 8, talkover: 1, echo_route: 1};
 
-    document.addEventListener('play', function(e){ if (e.target.classList && e.target.classList.contains('cm-audio')) playing.add(e.target); }, true);
+    document.addEventListener('play', function(e){ if (e.target.classList && e.target.classList.contains('cm-audio')) { playing.add(e.target); if (S) route(e.target); } }, true);
     ['pause', 'ended', 'emptied'].forEach(function(n){ document.addEventListener(n, function(e){ playing.delete(e.target); }, true); });
-    document.addEventListener('cm-voice', function(e){ var d = e.detail || {}; if (!P || P.sid !== d.sid) return; if (!d.heard) { resume(P.els); show('nothing heard - reply resumed', d.sid); } P = null; });   // server verdict on the last sent utterance that paused a reply
+    document.addEventListener('cm-voice', function(e){ var d = e.detail || {}; if (!P || P.sid !== d.sid) return; if (!d.heard) { resume(P.els); show('nothing heard - reply resumed', d.sid); } else if (AQ[d.sid]) { AQ[d.sid].dropped = true; if (AQ[d.sid].cur) AQ[d.sid].cur.remove(); } P = null; });
+    document.addEventListener('cm-voice-audio', function(e){   // one spoken segment of a reply that is still being written
+        var d = e.detail || {}, q = AQ[d.sid];
+        if (!q || q.turn !== d.turn) q = AQ[d.sid] = {turn: d.turn, next: 0, parts: {}, cur: null, dropped: false};
+        if (q.dropped || d.last) return;
+        q.parts[d.seq] = d; playNext(d.sid);
+    });
+    function playNext(sid){
+        var q = AQ[sid]; if (!q || q.dropped || q.cur) return;
+        if (S && S.mode === 'call' && S.state === 'speaking') { setTimeout(function(){ playNext(sid); }, 300); return; }   // never start the next sentence over someone talking
+        var d = q.parts[q.next]; if (!d) return;
+        delete q.parts[q.next]; q.next++;
+        if (!d.audio_b64) { playNext(sid); return; }   // a segment the speech node failed on is skipped, the order holds
+        var a = document.createElement('audio'); a.className = 'cm-audio'; a.style.display = 'none'; a.src = 'data:audio/' + (d.format || 'wav') + ';base64,' + d.audio_b64;
+        document.body.appendChild(a); q.cur = a;   // in the document, so the play/pause listeners (barge-in) see it
+        var done = function(){ a.remove(); if (q.cur === a) q.cur = null; playNext(sid); };
+        a.addEventListener('ended', done); a.addEventListener('error', done);
+        var p = a.play(); if (p && p.catch) p.catch(function(){ show('tap the page once to allow audio', sid); });
+    }   // server verdict on the last sent utterance that paused a reply
+
+    // --- reply output: element sources -> analyser (the echo reference) -> sink -> WebRTC loopback (or the speakers until it connects / if it cannot) ---
+    function out(){
+        if (O) return O;
+        var ctx = new AudioContext(), an = ctx.createAnalyser(), sink = ctx.createGain();
+        an.fftSize = 2048; sink.connect(ctx.destination);
+        O = {ctx: ctx, an: an, sink: sink, buf: new Float32Array(an.fftSize), hist: []};
+        if (opt('echo_route')) loop(O).catch(function(e){ console.warn('cmVoice: echo loopback unavailable, replies play directly', e); });
+        return O;
+    }
+    async function loop(o){
+        var dest = o.ctx.createMediaStreamDestination(), a = new RTCPeerConnection(), b = new RTCPeerConnection(), el = new Audio();
+        a.onicecandidate = function(e){ if (e.candidate) b.addIceCandidate(e.candidate); };
+        b.onicecandidate = function(e){ if (e.candidate) a.addIceCandidate(e.candidate); };
+        b.ontrack = function(e){ el.srcObject = e.streams[0]; el.play().then(function(){ o.sink.disconnect(o.ctx.destination); o.looped = el; }).catch(function(){}); };   // the speakers switch to the loopback only once it plays
+        o.sink.connect(dest); dest.stream.getTracks().forEach(function(t){ a.addTrack(t, dest.stream); });
+        var off = await a.createOffer(); await a.setLocalDescription(off); await b.setRemoteDescription(off);
+        var ans = await b.createAnswer(); await b.setLocalDescription(ans); await a.setRemoteDescription(ans);
+        o.pcs = [a, b];
+    }
+    function route(a){   // once per element: it then sounds only through the graph
+        var o = out();
+        if (!a._cmOut) { try { var s = o.ctx.createMediaElementSource(a); s.connect(o.an); s.connect(o.sink); a._cmOut = 1; } catch (e) { a._cmOut = -1; } }
+        if (o.ctx.state === 'suspended') o.ctx.resume();
+    }
+    function outDb(){ if (!O) return -120; O.an.getFloatTimeDomainData(O.buf); O.hist.push(db(O.buf)); if (O.hist.length > 3) O.hist.shift(); return Math.max.apply(null, O.hist); }   // the loudest of the last 3 frames covers the acoustic delay
+    function echoGate(e, o){   // true when the mic is clearly louder than the reply's own sound arriving at it; learns that level while it is not
+        var m = opt('echo_margin_db'), d = e - o;
+        if (!m || o < -80) return true;
+        if (M.ern < 15) { M.erl = M.ern++ ? Math.max(M.erl, d) : d; return false; }
+        if (d < M.erl + m) { M.erl += d > M.erl ? 0.3 * (d - M.erl) : -0.02; return false; }
+        return true;
+    }
 
     function opt(k){ return (S && S.cfg[k] !== undefined && S.cfg[k] !== null && S.cfg[k] !== '') ? Number(S.cfg[k]) : D[k]; }
     function show(t, sid){ var el = document.getElementById('cm-vad-' + (sid || (S && S.cfg.sid))); if (el) el.textContent = t; }
@@ -1020,7 +1078,8 @@ window.cmVoice = window.cmVoice || (function(){
         var node = new AudioWorkletNode(ctx, 'cm-frames', {numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit'});
         mute.gain.value = 0; merge.connect(node); node.connect(mute); mute.connect(ctx.destination);   // a silent sink keeps the worklet scheduled
         node.port.onmessage = function(e){ frame(e.data[0], e.data[1]); };
-        M = {stream: stream, ctx: ctx, rate: ctx.sampleRate, cal: frames(D.calib_ms), fs: 0, fn: 0, floor: -90};
+        M = {stream: stream, ctx: ctx, rate: ctx.sampleRate, cal: frames(D.calib_ms), fs: 0, fn: 0, floor: -90, erl: 0, ern: 0};
+        playing.forEach(route);
         return M;
     }
 
@@ -1035,7 +1094,8 @@ window.cmVoice = window.cmVoice || (function(){
         var e = db(band);
         if (M.cal > 0) { M.fs += e; M.fn++; M.floor = M.fs / M.fn; if (--M.cal === 0 && S && S.mode === 'call') show('listening'); return; }
         var guard = playing.size > 0 && !(S && S.state === 'speaking');   // a reply is playing and we are not yet in an utterance: barge-in rules apply
-        var speech = e > M.floor + opt('threshold_db') + (guard ? opt('bargein_db') : 0) && e > opt('min_db');
+        var clear = !guard || (echoGate(e, outDb()) && opt('talkover'));
+        var speech = clear && e > M.floor + opt('threshold_db') + (guard ? opt('bargein_db') : 0) && e > opt('min_db');
         var voiced = speech && voicing(band) >= opt('voicing');
         M.floor = e < M.floor ? M.floor * 0.9 + e * 0.1 : M.floor + (speech ? 0.0002 : 0.01) * (e - M.floor);   // falls fast to quiet, creeps up slowly, barely moves during speech
         if (!S || S.mode !== 'call') return;
@@ -1551,7 +1611,7 @@ class PortalEditor:
         did = doc["id"]; s = self._settings(doc, settings)
         style_tag = f"<style>{self.CSS}</style>" if include_css else ""
         layout_class = "wide-layout" if s["view"] == "split" else ""
-        border_style = "border:var(--border-thick) solid var(--border);" if s["border"] else ""
+        border_style = f"""--editor-zoom:{s["zoom"]};{"border:var(--border-thick) solid var(--border);" if s["border"] else ""}"""
         payload = self._action_payload(did, "toggle_task")
         toggle_url, _ = self._get_action_url("toggle_task", did)
         listener_js = f"""<script>(function(){{var el=document.getElementById('editor-shell-{did}');if(el&&!el.dataset.mdTaskBound){{el.dataset.mdTaskBound='1';el.addEventListener('md-task-toggle',function(e){{var v=Object.assign({{}}, {payload},{{idx:e.detail.idx}});htmx.ajax('POST','{toggle_url}',{{target:'#editor-preview-{did}',swap:'innerHTML',values:v}});}});}}}})();</script>"""
@@ -1585,7 +1645,7 @@ class PortalEditor:
         if self.enable_ai:
             url_ai, vals_ai = self._get_action_url("apply_ai", did)
             ai_btn = f"""<button class="btn-icon" title="Apply last AI response" hx-post="{url_ai}" {vals_ai} hx-target="#editor-shell-{did}" hx-swap="outerHTML">AI&#x27F3;</button>"""
-        save_btn = f"""<button id="editor-save-btn-{did}" class="btn-icon" title="Force save now (Ctrl+S)" hx-post="{url_save}" {vals_save} hx-include="#doc-textarea-{did}" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-on::before-request="var ta=document.getElementById('doc-textarea-{did}');if(ta&&ta.cm)ta.cm.save()">&#x1F4BE;</button>"""
+        save_btn = f"""<button id="editor-save-btn-{did}" class="btn-icon" title="Force save now (Ctrl+S)" hx-post="{url_save}" {vals_save} hx-include="#doc-textarea-{did}" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-on::before-request="var ta=document.getElementById('doc-textarea-{did}');if(ta&&ta.cm)ta.cm.save()" hx-on::after-request="var ok=event.detail.successful;this.innerHTML=ok?'&#x2713;':'&#x26A0;';this.title=ok?'Saved':'Save failed - see the server log';if(ok)document.getElementById('editor-dirty-{did}').style.display='none';var b=this;setTimeout(function(){{b.innerHTML='&#x1F4BE;';b.title='Force save now (Ctrl+S)'}},1500)">&#x1F4BE;</button>"""
         clean_btn = f"""<button class="btn-icon" title="Strip corrupted/double-encoded characters from source" hx-post="{url_clean}" {vals_clean} hx-include="#doc-textarea-{did}" hx-target="#editor-clean-sink-{did}" hx-swap="innerHTML">&#x1F9F9;</button>"""
         bottombar_toggle = f"""<button type="button" class="btn-icon" title="Quick-insert toolbar / interactive view" onclick="var b=document.getElementById('editor-bottombar-{did}');b.style.display=b.style.display==='none'?'flex':'none'">&#x2295;</button>"""
         help_btn = f"""<button type="button" class="btn-icon" title="What do these icons do?" onclick="var h=document.getElementById('editor-help-{did}');h.style.display=h.style.display==='none'?'block':'none'">?</button>"""
@@ -1602,8 +1662,8 @@ class PortalEditor:
                            {self._settings_btn(did, "&#x21AA;", "Toggle word wrap", {"wrap": not wrap}, active=wrap)}
                            {self._settings_btn(did, "Aa" if font=="mono" else "Tt", "Toggle font style", {"font": "prose" if font=="mono" else "mono"})}
                            {self._settings_btn(did, "&#x25A2;", "Toggle boundary border", {"border": not border}, active=border)}
-                           <button class="btn-icon" title="Search within document" hx-get="{url_search}" {vals_search} hx-target="#editor-search-{did}" hx-swap="innerHTML">&#x1F50D;</button>
-                           <button class="btn-icon" title="Document statistics" hx-get="{url_info}" {vals_info} hx-target="#editor-info-popup-{did}" hx-swap="innerHTML">&#x2139;</button>
+                           <button class="btn-icon" title="Search within document" hx-post="{url_search}" {vals_search} hx-target="#editor-search-{did}" hx-swap="innerHTML">&#x1F50D;</button>
+                           <button class="btn-icon" title="Document statistics" hx-post="{url_info}" {vals_info} hx-target="#editor-info-popup-{did}" hx-swap="innerHTML">&#x2139;</button>
                            {clean_btn}{save_btn}{download_btn}{print_btn}{bottombar_toggle}{help_btn}{ai_btn}
                        </div>
                        <span id="editor-clean-sink-{did}" style="display:none"></span>
@@ -1627,8 +1687,8 @@ class PortalEditor:
     def help_html(self) -> str:
         items = [("&#x1F4BE;","Save now"), ("&#x1F9F9;","Clean corrupted characters"), ("&#x2B07;","Download"), ("&#x1F5A8;","Print"), ("&#x2212;/&#x2b;","Zoom"), ("&#x21AA;","Word wrap"), ("Aa/Tt","Font style"), ("&#x25A2;","Boundary border"),("&#x1F50D;","Search"), ("&#x2139;","Document info"), ("&#x2295;","Quick-insert / interactive toolbar"), ("&#x1F517;","Clickable checkboxes (view mode)"), ("&#x21E5;/&#x21E4;","Indent / outdent current line")]
         rows = "".join(f'<div style="display:flex;gap:.5rem;padding:.15rem 0"><span style="min-width:2.2rem">{i}</span><span style="color:var(--text_muted)">{UI.escape(l)}</span></div>' for i,l in items)
-        return f"""<div class="glass" style="padding:.6rem .8rem;font-size:.75rem"><div style="font-weight:600;margin-bottom:.3rem">Toolbar Icons</div>{rows}<button type="button" class="ui-btn" style="width:100%;margin-top:.5rem;justify-content:center" onclick="this.parentElement.style.display='none'">Close</button></div>"""
-
+        return f"""<div class="glass" style="padding:.6rem .8rem;font-size:.75rem"><div style="font-weight:600;margin-bottom:.3rem">Toolbar Icons</div>{rows}<button type="button" class="ui-btn" style="width:100%;margin-top:.5rem;justify-content:center" onclick="this.closest('.editor-info-popup').style.display='none'">Close</button></div>"""
+        
     def render_preview(self, content: str, zoom: float = 1.0, **kwargs) -> str:
         kwargs.setdefault("code_mirror", True)
         kwargs.setdefault("enable_graphviz", self.enable_graphviz)
@@ -1643,7 +1703,6 @@ class PortalEditor:
     def content_html(self, doc: dict, settings: dict) -> str:
         did = doc["id"]
         view, font, wrap, zoom = settings.get("view", 1), settings["font"], settings["wrap"], settings.get("zoom", 1)
-        zoom = 1.0
         content_val = UI.escape(doc.get("content", "")); wrap_class = "wrapped" if wrap else "unwrapped"
         font_size = f"font-size:calc(0.95rem * {zoom})"
         url_save, vals_save = self._get_action_url("save", did)
@@ -1672,9 +1731,9 @@ class PortalEditor:
                            <span style="color:var(--text_muted)">Size</span><span>{size_str}</span>
                            <span style="color:var(--text_muted)">Saved</span><span>{doc.get("modified", "")[:16].replace("T"," ") or "unsaved"}</span>
                        </div>
-                       <button type="button" class="ui-btn" style="width:100%; margin-top:0.5rem; padding:0.2rem; font-size:0.7rem; justify-content:center;" onclick="this.parentElement.innerHTML=''">Close</button>
+                       <button type="button" class="ui-btn" style="width:100%; margin-top:0.5rem; padding:0.2rem; font-size:0.7rem; justify-content:center;" onclick="this.closest('.editor-info-popup').innerHTML=''">Close</button>
                    </div>"""
-
+                       
     def search_form_html(self, did: str) -> str:
         url_search, vals_search = self._get_action_url("search_action", did)
         return f"""<form style="display:flex; align-items:center; gap:0.4rem; padding:0.4rem 0.8rem; border-bottom:var(--border-thick) solid var(--border); background:var(--surface);" hx-post="{url_search}" {vals_search} hx-target="#editor-search-results-{did}" hx-swap="innerHTML">
@@ -1729,10 +1788,15 @@ class PortalEditor:
         return imr.raw("")
 
     async def _im_clean(self, request, payload, imr):
-        did = payload.get("branch", "default")
-        cleaned = clean_text(payload.get("content", ""))
-        return imr.raw(f'<script>(function(){{var ta=document.getElementById("doc-textarea-{did}");if(ta){{ta.value={json.dumps(cleaned)};if(ta.cm)ta.cm.setValue({json.dumps(cleaned)});}}}})();</script>')
-
+        """Replaces the editor text with clean_text() of it and saves; the info popup says how many characters changed (nothing is saved when nothing changed)."""
+        did, before = payload.get("branch", "default"), payload.get("content", "")
+        cleaned = clean_text(before)
+        changed = sum(a != b for a, b in zip(before, cleaned)) + abs(len(before) - len(cleaned))
+        note = f"""<div class="glass" style="padding:.5rem .8rem;font-size:.75rem">{"&#x2713; Cleaned - " + str(changed) + " character(s) changed, saved." if changed else "Nothing to clean - no corrupted characters found."}<button type="button" class="ui-btn" style="width:100%;margin-top:.4rem;justify-content:center;font-size:.7rem" onclick="this.closest('.editor-info-popup').innerHTML=''">Close</button></div>"""
+        imr.oob(note, f"editor-info-popup-{did}")
+        if not changed: return imr.raw("")
+        return imr.raw(f"""<script>(function(){{var ta=document.getElementById("doc-textarea-{did}");if(!ta)return;var v={json.dumps(cleaned)};if(ta.cm)ta.cm.setValue(v);else ta.value=v;htmx.trigger(ta,"blursave");}})();</script>""")
+    
     async def _im_settings(self, request, payload, imr):
         doc = await self._get_doc_from_state(request, payload)
         current_settings = doc.get("settings", {})
