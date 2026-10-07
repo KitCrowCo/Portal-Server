@@ -967,6 +967,13 @@ CHAT_VOICE_CSS = """
 .cm-mic,.cm-call{touch-action:none;user-select:none;-webkit-user-select:none;}
 .cm-mic.active,.cm-call.active{background:var(--accent);color:var(--bg);}
 .cm-vad{font-size:.65rem;color:var(--text_muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:12rem;}
+.cm-cap{flex-shrink:0;max-height:7.5rem;overflow-y:auto;padding:.25rem .6rem;border-top:var(--border-thick) solid var(--border);font-size:.84rem;line-height:1.5;}
+.cm-cap:empty{display:none;}
+.cm-cap-line{color:var(--text_muted);}
+.cm-cap-now{color:inherit;}
+.cm-cap-miss{font-style:italic;}
+.cm-cap-miss::after{content:" (not spoken)";font-size:.65rem;}
+.cm-cap-note{font-size:.65rem;font-style:italic;}
 """
 
 # Voice for ChatManager (enabled per instance with voice=True): hold-to-talk and hands-free call mode, one shared script for every chat surface.
@@ -974,15 +981,19 @@ CHAT_VOICE_CSS = """
 # Detection runs on 20 ms frames of the 300-3400 Hz speech band (browser biquad filters):
 #   - energy against an adaptive noise floor set by a short calibration (is something there),
 #   - periodicity of that band (is it a voice): normalized autocorrelation over 70-400 Hz pitch periods; noise, clicks and hum score low,
-#   - an utterance starts after start_ms of energy with at least half its frames voiced, ends after end_ms of quiet, and is sent only if it held min_voiced_ms of voiced frames - anything less is dropped in the browser and never reaches the server.
+#   - an utterance starts after start_ms of energy with at least half its frames voiced, ends after end_ms of quiet, and is sent only if it held
+#     min_voiced_ms of voiced frames - anything less is dropped in the browser and never reaches the server.
 # Echo, in three layers (a loudspeaker hears its own replies):
-#   1. replies play through a local WebRTC loopback (echo_route), so the browser's echo canceller knows what the speaker plays - it otherwise only knows WebRTC audio, and plain <audio> playback reaches the mic untouched on most platforms;
-#   2. an echo gate (echo_margin_db): while a reply plays, the gap between mic level and speaker output level is learned (the first 300 ms of output only learn), and the mic counts as talking only when it is clearly louder than that learned echo;
+#   1. replies play through a local WebRTC loopback (echo_route), so the browser's echo canceller knows what the speaker plays - it otherwise only
+#      knows WebRTC audio, and plain <audio> playback reaches the mic untouched on most platforms;
+#   2. an echo gate (echo_margin_db): while a reply plays, the gap between mic level and speaker output level is learned (the first 300 ms of output
+#      only learn), and the mic counts as talking only when it is clearly louder than that learned echo;
 #   3. talkover = 0 ignores the mic entirely while a reply plays (half-duplex).
-# While a reply plays, starting also needs the stricter barge-in margin held for bargein_ms; the reply is then paused, not stopped. 
-# If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
-# Replies spoken while they are written arrive as `cm-voice-audio` triggers {sid, turn, seq, audio_b64, format, text, last}: segments are queued by seq per chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply).
-# A sent utterance that stopped a reply drops the rest of that turn.
+# Coming back to the page (visibilitychange) resumes suspended audio; a call whose mic the browser stopped in the background reopens it and re-measures the room.
+# While a reply plays, starting also needs the stricter barge-in margin held for bargein_ms; the reply is then paused, not stopped. If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply
+# resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
+# Replies spoken while they are written arrive as `cm-voice-audio` triggers {sid, turn, seq, audio_b64, format, text, last}: segments are queued by seq per
+# chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply). A sent utterance that stopped a reply drops the rest of that turn.
 # Raw string: the JS must reach the browser byte for byte.
 CHAT_VOICE_JS = r"""
 window.cmVoice = window.cmVoice || (function(){
@@ -992,6 +1003,15 @@ window.cmVoice = window.cmVoice || (function(){
 
     document.addEventListener('play', function(e){ if (e.target.classList && e.target.classList.contains('cm-audio')) { playing.add(e.target); if (S) route(e.target); } }, true);
     ['pause', 'ended', 'emptied'].forEach(function(n){ document.addEventListener(n, function(e){ playing.delete(e.target); }, true); });
+    document.addEventListener('visibilitychange', function(){ if (!document.hidden) revive(); });   // phones suspend audio in the background
+    async function revive(){   // on return: resume what the browser suspended; a call whose mic was stopped gets a fresh mic and room measurement
+        if (O && O.ctx.state !== 'running') O.ctx.resume().catch(function(){});
+        if (!S || S.mode !== 'call' || !M) return;
+        if (M.ctx.state !== 'running') await M.ctx.resume().catch(function(){});
+        if (M.ctx.state === 'running' && M.stream.getAudioTracks().some(function(t){ return t.readyState === 'live'; })) return;
+        var sid = S.cfg.sid; close(); Object.assign(S, {state: 'listening', rec: [], pre: [], above: 0, vrun: 0, below: 0, voiced: 0});
+        try { await mic(); show('back - stay quiet a moment', sid); } catch (e) { fail(e, sid); }
+    }
     document.addEventListener('cm-voice', function(e){ var d = e.detail || {}; if (!P || P.sid !== d.sid) return; if (!d.heard) { resume(P.els); show('nothing heard - reply resumed', d.sid); } else if (AQ[d.sid]) { AQ[d.sid].dropped = true; if (AQ[d.sid].cur) AQ[d.sid].cur.remove(); } P = null; });
     document.addEventListener('cm-voice-audio', function(e){   // one spoken segment of a reply that is still being written
         var d = e.detail || {}, q = AQ[d.sid];
@@ -1175,7 +1195,6 @@ window.cmVoice = window.cmVoice || (function(){
     return {hold: hold, release: release, toggleCall: toggleCall};
 })();
 """
-
 
 CHAT_SCRIPT = """
 function cmCopyText(text) {
@@ -1380,7 +1399,7 @@ class ChatManager:
         return f'<div class="cm-msg {role_cls}" id="cm-msg-{mid}" data-msg-id="{mid}">{avatar}{bwrap}{acts_html}</div>'
 
     def _voice_html(self, sid, voice_opts=None) -> str:
-        """Mic controls for the footer. voice_opts tunes call-mode detection per conversation (threshold_db, bargein_db, bargein_ms, min_db, start_ms, end_ms, preroll_ms, min_voiced_ms, voicing, max_ms); unset keys use the script defaults. The audio intent's owner may push a `cm-voice` trigger {sid, heard} after transcribing: heard=false resumes a reply the utterance paused."""
+        """Mic controls for the footer. voice_opts tunes call-mode detection per conversation (threshold_db, bargein_db, bargein_ms, min_db, start_ms, end_ms, preroll_ms, min_voiced_ms, voicing, max_ms, echo_margin_db, talkover, echo_route, merge_running, captions, caption_lines); unset keys use the script defaults. The audio intent's owner may push a `cm-voice` trigger {sid, heard} after transcribing: heard=false resumes a reply the utterance paused."""
         cfg = UI.escape(json.dumps({"sid": sid, "intent": self.audio_intent, "branch": self.branch_id, "lvl": self.nesting_level, **{k: v for k, v in (voice_opts or {}).items() if v not in (None, "")}}))
         return f"""<button type="button" class="cm-qbtn cm-mic" data-cm-voice="{cfg}" onpointerdown="cmVoice.hold(this, event)" onpointerup="cmVoice.release(this)" onpointerleave="cmVoice.release(this)" onpointercancel="cmVoice.release(this)" oncontextmenu="return false" title="Hold to talk">&#x1F3A4;</button><button type="button" class="cm-qbtn cm-call" data-cm-voice="{cfg}" onpointerdown="cmVoice.toggleCall(this)" title="Call mode: talk hands-free; speaking over a reply interrupts it">&#x260E;</button><span class="cm-vad" id="cm-vad-{sid}"></span>"""
 
@@ -1979,6 +1998,14 @@ class SettingsPanel:
                        {body_html}
                     </div>"""
 
+# --- Atomic JSON Writes ---
+
+def write_json_atomic(path, data, indent=2):
+    """Writes JSON to a sibling .tmp file, flushes it to disk, then renames it over the target. A crash or power loss mid-write leaves the previous file whole instead of a truncated one; the rename is atomic within one filesystem."""
+    p = Path(path); tmp = p.with_name(f"{p.name}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f, indent=indent); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, p)
+    
 # --- File Manager ---
 # General-purpose, root-isolated file I/O. Optional IM/TM injection wires standard open/save intents for any module that wants file-backed tabs without reimplementing this.
 

@@ -476,9 +476,10 @@ class UI:
         return out
 
     @staticmethod
-    def theme_editor_panel(current: dict, save_url: str, title: str = "Theme", extra_actions: str = "") -> str:
+    def theme_editor_panel(current: dict, save_url: str, title: str = "Theme", extra_actions: str = "", presets: dict = None) -> str:
         """Reusable key/value theme editor. `current` is the already-resolved dict to display.
-        Parametrized purely by save_url so server-default, module-default, and per-module user-override all reuse this one renderer instead of three copies."""
+        Parametrized purely by save_url so server-default, module-default, and per-module user-override all reuse this one renderer instead of three copies.
+        presets: {name: theme dict} offered in a "Load a saved theme" select that fills the editor (nothing is stored until Save)."""
         system_vars = set()
         for candidate in ("frontend/templates/base.html", "templates/base.html", "base.html"):
             try: system_vars = set(re.findall(r"--([a-zA-Z0-9_-]+)[:)]", open(candidate).read())); break
@@ -498,6 +499,9 @@ class UI:
               <button type="button" onclick="this.closest('.theme-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;padding:0;">&#x2715;</button>
             </div>"""
         pid = f"tp{abs(hash(save_url))%0xFFFFFF:06x}"
+        presets_js = json.dumps(presets or {}).replace("</", "<\\/")   # safe inside the <script> block
+        preset_opts = "".join(f"""<option value="{UI.escape(n)}">{UI.escape(n)}</option>""" for n in (presets or {}))
+        preset_pick = f"""<select onchange="if(this.value) td_load_{pid}(TD_PRESETS_{pid}[this.value]); this.value=''" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);width:100%;margin-bottom:0.6rem;"><option value="">Load a saved theme into the editor...</option>{preset_opts}</select>""" if presets else ""
         return f"""
         <div id="{pid}">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
@@ -511,6 +515,7 @@ class UI:
           <div style="display:grid;grid-template-columns:1fr 1.5fr 32px;gap:0.7rem;padding:0.3rem 0.5rem;font-size:0.7rem;color:var(--text_muted);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);margin-bottom:0.3rem;">
             <div>Variable</div><div>Value</div><div></div>
           </div>
+          {preset_pick}
           <div id="list-{pid}" style="max-height:42vh;overflow-y:auto;">{rows_html}</div>
           <div style="display:flex;gap:0.5rem;margin-top:0.8rem;padding:0.8rem;border:2px dashed var(--border);border-radius:var(--radius);">
             <input type="text" id="nk-{pid}" placeholder="variable_name" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);min-width:0;">
@@ -534,6 +539,8 @@ class UI:
                 </div>`);
               k.value=''; v.value='';
             }}
+            const TD_PRESETS_{pid}={presets_js};
+            function td_load_{pid}(cfg){{ if(!cfg) return; document.getElementById('list-{pid}').innerHTML=''; const k=document.getElementById('nk-{pid}'),v=document.getElementById('nv-{pid}'); Object.entries(cfg).forEach(([a,b])=>{{ k.value=a; v.value=String(b); td_add_{pid}(); }}); }}
             async function td_save_{pid}(){{ const r=await fetch('{save_url}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(td_data_{pid}())}}); if(r.ok) window.location.reload(); }}
             function td_dl_{pid}(){{ const blob=new Blob([JSON.stringify(td_data_{pid}(),null,2)],{{type:'application/json'}}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='theme.json'; a.click(); }}
             function td_ul_{pid}(input){{

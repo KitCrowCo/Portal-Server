@@ -49,9 +49,9 @@ def try_send_ws(notification: Notification):
 
 # Control Panel has limited options for non admin.
 @router.get("/", response_class=HTMLResponse)
-def control_panel_main(request: Request, user=Depends(get_current_user)):
+async def control_panel_main(request: Request, user=Depends(get_current_user)):
     if not user: raise HTTPException(403)
-    themes_options = "".join(f'<option value="{k}"{" selected" if user.custom_theme == v else ""}>{v["name"]}</option>' for k, v in DEFAULT_THEMES.items())
+    themes_options = "".join(f"""<option value="{k}"{" selected" if user.custom_theme == v else ""}>{v["name"]}</option>""" for k, v in DEFAULT_THEMES.items()) + _saved_options(await _saved_themes(request), user.custom_theme)
     nav_items = []
     nav_items += [("Identity", f"{_pre}/account"), ("Appearance", f"{_pre}/appearance")]
     if user.role == "admin": nav_items += [("User Management", f"{_pre}/users"), ("Notifications", f"{_pre}/notifications"), ("Module Access", f"{_pre}/module-access"), ("External Links", f"{_pre}/ext-links"), ("Server Theme", f"{_pre}/theme/server-default")]
@@ -344,7 +344,7 @@ async def cp_ext_links_save(request: Request, links: list = Body(...), user=Depe
 # --- Appearance ---
 
 @router.get("/appearance", response_class=HTMLResponse)
-def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_current_user)):
+async def cp_appearance_fragment(request: Request, db: Session = Depends(get_db), user=Depends(get_current_user)):
     user_config = getattr(user, "custom_theme", {}) or {}
     if not user_config:
         active = db.query(Theme).filter(Theme.is_active == True).first()
@@ -375,6 +375,7 @@ def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_curre
           <button type="button" onclick="this.closest('.theme-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;padding:0;">&#x2715;</button>
         </div>"""
 
+    saved = await _saved_themes(request)
     return HTMLResponse(f"""
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
       <h3 style="margin:0;">Appearance</h3>
@@ -387,6 +388,7 @@ def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_curre
     <div style="display:grid;grid-template-columns:1fr 1.5fr 3.2rem;gap:0.7rem;padding:0.3rem 0.5rem;font-size:0.7rem;color:var(--text_muted);text-transform:uppercase;letter-spacing:0.05rem;border-bottom:var(--border-bottom) solid var(--border);margin-bottom:0.3rem;">
       <div>Variable</div><div>Value</div><div></div>
     </div>
+    {_saved_bar_html(saved)}
     <div id="theme-editor-list" style="max-height:42vh;overflow-y:auto;">{rows_html}</div>
     <div style="display:flex;gap:0.5rem;margin-top:0.8rem;padding:0.8rem;border:.2rem dashed var(--border);border-radius:var(--radius);">
       <input type="text" id="new-key-name" placeholder="variable_name" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);min-width:0;">
@@ -414,11 +416,18 @@ def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_curre
         const cs=isColor?'width:3.8rem;height:3rem;padding:.2rem;cursor:pointer;border-radius:.4rem;':'display:none;';
         document.getElementById('theme-editor-list').insertAdjacentHTML('beforeend',`
           <div class="theme-row" style="display:grid;grid-template-columns:1fr 1.5fr 3.2rem;gap:0.7rem;align-items:center;padding:0.4rem 0.5rem;border-bottom:var(--border-bottom) solid var(--border);">
-            <div style="display:flex;flex-direction:column;gap:0.1rem;"><span style="font-size:0.6rem;color:var(--text_muted);">custom</span><input type="text" class="key-input" value="\${{k.value}}" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;font-family:monospace;width:100%;box-sizing:border-box;"></div>
-            <div style="display:flex;gap:0.4rem;align-items:center;"><input type="color" value="\${{isColor?v.value:'#ffffff'}}" oninput="this.nextElementSibling.value=this.value" style="\${{cs}}"><input type="text" value="\${{v.value}}" class="val-input" oninput="this.previousElementSibling.value=this.value" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;min-width:0;"></div>
+            <div style="display:flex;flex-direction:column;gap:0.1rem;"><span style="font-size:0.6rem;color:var(--text_muted);">custom</span><input type="text" class="key-input" value="${{k.value}}" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;font-family:monospace;width:100%;box-sizing:border-box;"></div>
+            <div style="display:flex;gap:0.4rem;align-items:center;"><input type="color" value="${{isColor?v.value:'#ffffff'}}" oninput="this.nextElementSibling.value=this.value" style="${{cs}}"><input type="text" value="${{v.value}}" class="val-input" oninput="this.previousElementSibling.value=this.value" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;min-width:0;"></div>
             <button type="button" onclick="this.closest('.theme-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;padding:0;">&#x2715;</button>
           </div>`);
         k.value=''; v.value='';
+      }}
+      function loadIntoEditor(name){{   // replaces the editor rows with a saved theme (data travels with the saved-themes strip); nothing is stored until Save
+        const cfg=JSON.parse(document.getElementById('theme-saved-data').textContent)[name];
+        if(!cfg) return;
+        document.getElementById('theme-editor-list').innerHTML='';
+        const k=document.getElementById('new-key-name'),v=document.getElementById('new-key-val');
+        Object.entries(cfg).forEach(([a,b])=>{{ k.value=a; v.value=String(b); addRow(); }});
       }}
       async function saveActiveTheme(){{
         const r=await fetch('{_pre}/theme/save',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(getEditorData())}});
@@ -451,11 +460,11 @@ def cp_appearance_fragment(db: Session = Depends(get_db), user=Depends(get_curre
     </script>""")
 
 @router.get("/theme/server-default", response_class=HTMLResponse)
-async def cp_theme_server_default(user=Depends(get_current_user), db: Session = Depends(get_db)):
+async def cp_theme_server_default(request: Request, user=Depends(get_current_user), db: Session = Depends(get_db)):
     if user.role != "admin": return HTMLResponse("Unauthorized", status_code=403)
     row = db.query(ServerState).first()
     current = {**DEFAULT_THEMES.get("dark", {}), **((row.state or {}).get("_theme", {}).get("server_default", {}) if row and row.state else {})}
-    return HTMLResponse(UI.theme_editor_panel(current, save_url=f"{_pre}/theme/server-default/save", title="Server Default Theme"))
+    return HTMLResponse(UI.theme_editor_panel(current, save_url=f"{_pre}/theme/server-default/save", title="Server Default Theme", presets=await _saved_themes(request)))
 
 @router.post("/theme/server-default/save")
 async def cp_theme_server_default_save(config: dict = Body(...), user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -468,9 +477,9 @@ async def cp_theme_server_default_save(config: dict = Body(...), user=Depends(ge
     return {"status": "ok"}
 
 @router.get("/theme/module-default/{module_ns}", response_class=HTMLResponse)
-async def cp_theme_module_default(module_ns: str, user=Depends(get_current_user)):
+async def cp_theme_module_default(module_ns: str, request: Request, user=Depends(get_current_user)):
     if user.role != "admin": return HTMLResponse("Unauthorized", status_code=403)
-    return HTMLResponse(UI.theme_editor_panel(get_module_default_theme(module_ns), save_url=f"{_pre}/theme/module-default/{module_ns}/save", title=f"Module Default: {module_ns}"))
+    return HTMLResponse(UI.theme_editor_panel(get_module_default_theme(module_ns), save_url=f"{_pre}/theme/module-default/{module_ns}/save", title=f"Module Default: {module_ns}", presets=await _saved_themes(request)))
 
 @router.post("/theme/module-default/{module_ns}/save")
 async def cp_theme_module_default_save(module_ns: str, config: dict = Body(...), user=Depends(get_current_user)):
@@ -482,7 +491,7 @@ async def cp_theme_module_default_save(module_ns: str, config: dict = Body(...),
 async def cp_theme_module_user(module_ns: str, request: Request, user=Depends(get_current_user)):
     current = await resolve_theme_full(request, module_ns=module_ns)
     extra = f'''<button type="button" class="button" style="width:100%;background:var(--bg_panel);" onclick="if(confirm('Remove your override and use the default for this module?')) fetch('{_pre}/theme/module-user/{module_ns}/clear',{{method:'POST'}}).then(()=>window.location.reload())">&#x21BA; Clear override</button>'''
-    return HTMLResponse(UI.theme_editor_panel(current, save_url=f"{_pre}/theme/module-user/{module_ns}/save", title=f"My Theme Override: {module_ns}", extra_actions=extra))
+    return HTMLResponse(UI.theme_editor_panel(current, save_url=f"{_pre}/theme/module-user/{module_ns}/save", title=f"My Theme Override: {module_ns}", extra_actions=extra, presets=await _saved_themes(request)))
 
 @router.post("/theme/module-user/{module_ns}/save")
 async def cp_theme_module_user_save(module_ns: str, request: Request, config: dict = Body(...), user=Depends(get_current_user)):
@@ -495,14 +504,54 @@ async def cp_theme_module_user_clear(module_ns: str, request: Request, user=Depe
     return {"status": "ok"}
 
 @router.post("/theme/switch", response_class=HTMLResponse)
-def cp_theme_switch(theme_mode: str = Form(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if theme_mode not in DEFAULT_THEMES: return HTMLResponse("Unknown theme", status_code=400)
-    user.custom_theme = DEFAULT_THEMES[theme_mode]
+async def cp_theme_switch(request: Request, theme_mode: str = Form(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """A built-in theme by key, or one of this user's saved themes as 'saved:<name>'."""
+    chosen = (await _saved_themes(request)).get(theme_mode[6:]) if theme_mode.startswith("saved:") else DEFAULT_THEMES.get(theme_mode)
+    if not chosen: return HTMLResponse("Unknown theme", status_code=400)
+    user.custom_theme = chosen
     db.commit()
     return HTMLResponse("OK")
 
 async def _saved_themes(request) -> dict: return await get_state(request, scope="user", namespace="_theme_saved") or {}
 async def _set_saved_themes(request, data: dict): await set_state(request, data, scope="user", namespace="_theme_saved")
+
+def _js_json(v) -> str: return json.dumps(v).replace("</", "<\\/")   # safe inside a <script> block
+
+def _option(value: str, label: str, selected: bool = False) -> str: return f"""<option value="{UI.escape(value)}"{" selected" if selected else ""}>{UI.escape(label)}</option>"""
+
+def _saved_options(saved: dict, current=None) -> str:
+    """Sidebar theme select entries for this user's saved themes (values 'saved:<name>' - see cp_theme_switch)."""
+    return f"""<optgroup label="My saved themes">{"".join(_option(f"saved:{n}", n, current == c) for n, c in saved.items())}</optgroup>""" if saved else ""
+
+def _saved_bar_html(saved: dict, note: str = "") -> str:
+    """Saved-themes strip in Appearance: apply one, load one into the editor, delete one, or save the editor's current values under a name."""
+    opts = "".join(_option(n, n) for n in saved) or _option("", "(none saved yet)")
+    ctl = "background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.8rem;"
+    return f"""<div id="theme-saved-bar" style="display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;margin:0 0 0.8rem;padding:0.6rem;border:var(--border-thick) solid var(--border);border-radius:var(--radius);">
+      <span style="font-size:0.7rem;color:var(--text_muted);text-transform:uppercase;letter-spacing:0.05rem;">Saved themes</span>
+      <select id="theme-saved-pick" name="name" style="{ctl}flex:1;min-width:8rem;">{opts}</select>
+      <button type="button" class="button" style="padding:0.3rem 0.6rem;" hx-post="{_pre}/theme/saved_apply" hx-include="#theme-saved-pick" hx-swap="none" hx-on::after-request="if(event.detail.successful) window.location.reload()" title="Make it your theme">Apply</button>
+      <button type="button" class="button" style="padding:0.3rem 0.6rem;" onclick="loadIntoEditor(document.getElementById('theme-saved-pick').value)" title="Load into the editor below (nothing is saved until Save)">Edit</button>
+      <button type="button" class="button" style="padding:0.3rem 0.6rem;color:#ff5f5f;" hx-post="{_pre}/theme/saved_delete" hx-include="#theme-saved-pick" hx-target="#theme-saved-bar" hx-swap="outerHTML" hx-confirm="Delete this saved theme? Themes in use are not affected.">&#x2715;</button>
+      <span style="flex-basis:100%;height:0;"></span>
+      <input id="theme-save-name" name="name" placeholder="Name for the values below" style="{ctl}flex:1;min-width:8rem;">
+      <button type="button" class="button" style="padding:0.3rem 0.6rem;" hx-post="{_pre}/theme/saved_save" hx-include="#theme-save-name" hx-vals='js:{{config: JSON.stringify(getEditorData())}}' hx-target="#theme-saved-bar" hx-swap="outerHTML">&#x1F4BE; Save as</button>
+      <span style="font-size:0.75rem;">{note}</span>
+      <script type="application/json" id="theme-saved-data">{_js_json(saved)}</script>
+    </div>"""
+
+@router.post("/theme/save")
+async def cp_theme_save(config: dict = Body(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Appearance Save / Import: the posted variables become this user's general theme."""
+    user.custom_theme = config
+    db.commit()
+    return {"status": "ok"}
+
+@router.get("/theme/defaults")
+async def cp_theme_defaults(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Appearance Reset: the theme a user without a personal theme gets (built-in base + the admin's server default)."""
+    row = db.query(ServerState).first()
+    return {**DEFAULT_THEMES.get("dark", {}), **((row.state or {}).get("_theme", {}).get("server_default", {}) if row and row.state else {})}
 
 @router.get("/theme/saved_list", response_class=HTMLResponse)
 async def theme_saved_list(request: Request, user=Depends(get_current_user)):
@@ -513,17 +562,27 @@ async def theme_saved_list(request: Request, user=Depends(get_current_user)):
                             </select>""")
 
 @router.post("/theme/saved_save", response_class=HTMLResponse)
-async def theme_saved_save(request: Request, name: str = Form(...), user=Depends(get_current_user), db: Session = Depends(get_db)):
-    saved = await _saved_themes(request)
-    saved[name] = dict(getattr(user, "custom_theme", None) or {})
+async def theme_saved_save(request: Request, name: str = Form(""), config: str = Form(""), user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Stores the editor's values (config, JSON) under a name - or, without config, the user's current theme. An existing name is replaced, which the note says."""
+    saved, name = await _saved_themes(request), name.strip()
+    if not name: return HTMLResponse(_saved_bar_html(saved, '<span style="color:#ffaa44">Give it a name first.</span>'))
+    note = f"""<span style="color:var(--accent)">&#x2713; {"Replaced" if name in saved else "Saved"} '{UI.escape(name)}'.</span>"""
+    saved[name] = json.loads(config) if config else dict(getattr(user, "custom_theme", None) or {})
     await _set_saved_themes(request, saved)
-    return HTMLResponse(f"<span style='color:var(--accent)'>&#x2713; Saved as '{UI.escape(name)}'.</span>")
+    return HTMLResponse(_saved_bar_html(saved, note))
 
 @router.post("/theme/saved_apply", response_class=HTMLResponse)
 async def theme_saved_apply(request: Request, name: str = Form(...), user=Depends(get_current_user), db: Session = Depends(get_db)):
     saved = await _saved_themes(request)
     if name in saved: user.custom_theme = saved[name]; db.commit()
-    return cp_appearance_fragment(db=db, user=user)
+    return await cp_appearance_fragment(request, db=db, user=user)
+
+@router.post("/theme/saved_delete", response_class=HTMLResponse)
+async def theme_saved_delete_form(request: Request, name: str = Form(""), user=Depends(get_current_user)):
+    """Deletes one saved theme by name (form post, for the Appearance strip). A theme already applied somewhere keeps working - it was copied when applied."""
+    saved = await _saved_themes(request); saved.pop(name, None)
+    await _set_saved_themes(request, saved)
+    return HTMLResponse(_saved_bar_html(saved, f"""<span style="color:var(--text_muted)">Deleted '{UI.escape(name)}'.</span>""" if name else ""))
 
 @router.delete("/theme/saved/{name}", response_class=HTMLResponse)
 async def theme_saved_delete(name: str, request: Request, user=Depends(get_current_user)):
