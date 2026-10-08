@@ -220,7 +220,7 @@ MD_LIVE_EDIT_INIT_JS = """
             cm.getWrapperElement().classList.add('cm-live-edit');
             MD_LIVE.attach(cm);
             cm.on('change', function(){
-                if (ta.dataset.dirty === '1') return;
+                if (ta.dataset.live !== '0') MD_LIVE.attach(cm);
                 ta.dataset.dirty = '1';
                 document.getElementById('editor-dirty-'+did).style.display = 'inline';
             });
@@ -244,29 +244,36 @@ MD_LIVE_EDIT_INIT_JS = """
 
 MD_LIVE_OVERLAY_JS = r"""
 window.MD_LIVE = window.MD_LIVE || (() => {
+    // Styles markdown in place without changing the text: markers (** * ` # ```) stay visible and dimmed, the text between them shows bold / italic / code / heading.
+    // Token names become CodeMirror classes with a cm- prefix (md-strong -> .cm-md-strong in MD_LIVE_CSS). Inline spans and headings end with their line; code fences span lines.
+    const SPANS = [['**', 'md-strong'], ['__', 'md-strong'], ['*', 'md-em'], ['_', 'md-em'], ['`', 'md-code']];
+    function closes(stream, m) { const rest = stream.string.slice(stream.pos + m.length); return rest.length > 0 && rest[0] !== ' ' && rest.indexOf(m) > 0; }   // opens only when a closing marker follows on the same line, after at least one character
+    function wordEdge(stream) { return stream.pos === 0 || /\W/.test(stream.string[stream.pos - 1]); }   // _ and __ open only at a word edge, so snake_case stays plain
     function overlay() {
         return {
-            startState: function() { return { inFence: false }; },
-            token: function(stream, state) {
-                if (stream.sol() && stream.match(/```/)) {
-                    stream.skipToEnd();
-                    state.inFence = !state.inFence;
-                    return "fence";
+            startState: function() { return { fence: false, close: '', cls: '', head: '' }; },
+            token: function(stream, st) {
+                if (stream.sol()) { st.close = ''; st.cls = ''; st.head = ''; }
+                if (stream.sol() && stream.match('```')) { stream.skipToEnd(); st.fence = !st.fence; return 'md-marker md-code'; }
+                if (st.fence) { stream.skipToEnd(); return 'md-code'; }
+                if (stream.sol() && stream.match(/^#{1,6}(?=\s)/)) { st.head = ' md-heading md-h' + stream.current().length; return 'md-marker' + st.head; }
+                if (st.close) {
+                    if (stream.match(st.close)) { st.close = ''; st.cls = ''; return 'md-marker' + st.head; }
+                    while (!stream.eol() && !stream.match(st.close, false)) stream.next();   // always advances: the closing marker did not match at the start
+                    return st.cls + st.head;
                 }
-                if (state.inFence) {
-                    stream.skipToEnd();
-                    return "fence";
+                for (const [m, cls] of SPANS) {
+                    if (stream.match(m, false) && (m[0] !== '_' || wordEdge(stream)) && closes(stream, m)) { stream.match(m); st.close = m; st.cls = cls; return 'md-marker' + st.head; }
                 }
-                if (stream.match(/\*\*[^*]+\*\*/) || stream.match(/__[id]+__/)) return "bold";
-                if (stream.match(/\*[^*]+\*/) || stream.match(/_[^_]+_/)) return "italic";
-                if (stream.match(/`[^`]+`/)) return "code";
+                if (stream.match(/^\[[^\]]+\]\([^)]*\)/)) return 'md-link' + st.head;
                 stream.next();
-                return null;
+                return st.head ? st.head.trim() : null;
             }
         };
     }
+    function define() { if (!CodeMirror.modes['md-live']) CodeMirror.defineMode('md-live', function(config, spec) { return CodeMirror.overlayMode(CodeMirror.getMode(config, spec.backdrop || 'text/plain'), overlay()); }); }   // the mode option takes a spec (a name), not a mode object, so the overlay is registered as a named mode; defined on first attach, so pages without CodeMirror never touch it
     const _base = new WeakMap();   // the mode an editor had before attach, restored by detach
-    function attach(cm) { if (_base.has(cm)) return; const m = cm.getOption('mode') || 'text/plain'; _base.set(cm, m); cm.setOption('mode', CodeMirror.overlayMode(CodeMirror.getMode(cm.options, m), overlay())); }   // overlayMode (addon-overlay.js) carries the overlay's state; cm.addOverlay only takes stateless overlays
+    function attach(cm) { if (_base.has(cm)) return; define(); const m = cm.getOption('mode') || 'text/plain'; _base.set(cm, m); cm.setOption('mode', {name: 'md-live', backdrop: m}); }
     function detach(cm) { if (!_base.has(cm)) return; cm.setOption('mode', _base.get(cm)); _base.delete(cm); }
     return { attach, detach };
 })();
@@ -993,15 +1000,19 @@ CHAT_VOICE_CSS = """
 # While a reply plays, starting also needs the stricter barge-in margin held for bargein_ms; the reply is then paused, not stopped. If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply
 # resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
 # Replies spoken while they are written arrive as `cm-voice-audio` triggers {sid, turn, seq, audio_b64, format, text, last}: segments are queued by seq per
-# chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply). A sent utterance that stopped a reply drops the rest of that turn.
-# Raw string: the JS must reach the browser byte for byte.
+# chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply). 
+# A newer turn's speech replaces an older turn's (the older one stops, and its late segments are ignored); a sent utterance that stopped a reply drops the rest of that turn.
+# Captions: each segment's text is shown in a .cm-cap box above the footer as it starts playing; a segment that could not be spoken (no audio, or autoplay blocked) is shown marked.
+# merge_running: an utterance that ends while a turn is still running (even before any audio) presses Stop like a barge-in, so a prompt split by a pause is answered once; the server's transcript verdict still decides.
+# A pushed reply whose autoplay copy would repeat speech already streamed as segments is stopped once and logged to the console.# Raw string: the JS must reach the browser byte for byte.
 CHAT_VOICE_JS = r"""
 window.cmVoice = window.cmVoice || (function(){
     var WORKLET = "class P extends AudioWorkletProcessor{constructor(){super();this.n=0;this.a=new Float32Array(Math.round(sampleRate*0.02));this.b=new Float32Array(this.a.length)}process(i){var x=i[0];if(!x||!x[0])return true;var r=x[0],f=x[1]||x[0];for(var k=0;k<r.length;k++){this.a[this.n]=r[k];this.b[this.n]=f[k];if(++this.n===this.a.length){this.port.postMessage([this.a.slice(0),this.b.slice(0)]);this.n=0}}return true}}registerProcessor('cm-frames',P)";
     var M = null, S = null, P = null, O = null, playing = new Set(), AQ = {};
-    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500, voicing: 0.45, min_voiced_ms: 250, bargein_ms: 400, echo_margin_db: 8, talkover: 1, echo_route: 1};
-
-    document.addEventListener('play', function(e){ if (e.target.classList && e.target.classList.contains('cm-audio')) { playing.add(e.target); if (S) route(e.target); } }, true);
+    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500, voicing: 0.45, min_voiced_ms: 250, bargein_ms: 400, echo_margin_db: 8, talkover: 1, echo_route: 1, merge_running: 1, captions: 1, caption_lines: 4};
+    
+    document.addEventListener('play', function(e){ var a = e.target; if (!(a.classList && a.classList.contains('cm-audio')) || replayed(a)) return; playing.add(a); if (S) route(a); }, true);
+    document.addEventListener('submit', function(e){ var f = e.target; if (f.classList && f.classList.contains('cm-form') && AQ[f.dataset.cmSid]) AQ[f.dataset.cmSid].spoken = false; }, true);   // a typed turn starts fresh
     ['pause', 'ended', 'emptied'].forEach(function(n){ document.addEventListener(n, function(e){ playing.delete(e.target); }, true); });
     document.addEventListener('visibilitychange', function(){ if (!document.hidden) revive(); });   // phones suspend audio in the background
     async function revive(){   // on return: resume what the browser suspended; a call whose mic was stopped gets a fresh mic and room measurement
@@ -1012,26 +1023,69 @@ window.cmVoice = window.cmVoice || (function(){
         var sid = S.cfg.sid; close(); Object.assign(S, {state: 'listening', rec: [], pre: [], above: 0, vrun: 0, below: 0, voiced: 0});
         try { await mic(); show('back - stay quiet a moment', sid); } catch (e) { fail(e, sid); }
     }
-    document.addEventListener('cm-voice', function(e){ var d = e.detail || {}; if (!P || P.sid !== d.sid) return; if (!d.heard) { resume(P.els); show('nothing heard - reply resumed', d.sid); } else if (AQ[d.sid]) { AQ[d.sid].dropped = true; if (AQ[d.sid].cur) AQ[d.sid].cur.remove(); } P = null; });
+    document.addEventListener('cm-voice', function(e){   // server verdict on the last sent utterance that paused or cut a reply
+        var d = e.detail || {}; if (!P || P.sid !== d.sid) return;
+        if (!d.heard) { resume(P.els); show('nothing heard - reply continues', d.sid); } else if (AQ[d.sid]) drop(AQ[d.sid]);
+        P = null;
+    });
     document.addEventListener('cm-voice-audio', function(e){   // one spoken segment of a reply that is still being written
         var d = e.detail || {}, q = AQ[d.sid];
-        if (!q || q.turn !== d.turn) q = AQ[d.sid] = {turn: d.turn, next: 0, parts: {}, cur: null, dropped: false};
+        if (!q || q.turn !== d.turn) {
+            var gone = q ? q.gone : {};
+            if (gone[d.turn]) return;   // a late segment of a turn a newer one already replaced
+            if (q) { gone[q.turn] = 1; drop(q); }   // a newer turn's speech replaces an older turn's: never two at once
+            q = AQ[d.sid] = {sid: d.sid, turn: d.turn, next: 0, parts: {}, cur: null, dropped: false, spoken: false, gone: gone};
+        }
         if (q.dropped || d.last) return;
-        q.parts[d.seq] = d; playNext(d.sid);
-    });
+        q.spoken = true; q.parts[d.seq] = d; playNext(d.sid);
+    });  
+    function drop(q){   // stops a turn's speech for good: what is playing and what is still queued
+        if (q.dropped) return;
+        if (q.cur || Object.keys(q.parts).length) caption(q.sid, 'reply cut', 'cm-cap-note');
+        q.dropped = true; q.parts = {};
+        if (q.cur) { q.cur.pause(); q.cur.remove(); q.cur = null; }
+    }
+    function replayed(a){   // true (and stopped) for a pushed reply's autoplay copy when that chat's turn already streamed its speech as segments
+        if (!a.autoplay) return false;
+        a.autoplay = false;   // only the first play can be the automatic one; the player stays usable for replay
+        var f = a.closest('.cm-shell'), form = f && f.querySelector('.cm-form'), q = form && AQ[form.dataset.cmSid];
+        if (!q || !q.spoken) return false;
+        q.spoken = false; a.pause();
+        console.warn('cmVoice: a reply already spoken as streamed segments was also pushed with autoplay - the automatic replay was stopped; the audio intent should not set autoplay on a streamed turn');
+        return true;
+    }
     function playNext(sid){
         var q = AQ[sid]; if (!q || q.dropped || q.cur) return;
         if (S && S.mode === 'call' && S.state === 'speaking') { setTimeout(function(){ playNext(sid); }, 300); return; }   // never start the next sentence over someone talking
         var d = q.parts[q.next]; if (!d) return;
         delete q.parts[q.next]; q.next++;
-        if (!d.audio_b64) { playNext(sid); return; }   // a segment the speech node failed on is skipped, the order holds
+        if (!d.audio_b64) { caption(sid, d.text, 'cm-cap-miss'); playNext(sid); return; }   // a segment the speech node failed on is shown, not spoken; the order holds
         var a = document.createElement('audio'); a.className = 'cm-audio'; a.style.display = 'none'; a.src = 'data:audio/' + (d.format || 'wav') + ';base64,' + d.audio_b64;
         document.body.appendChild(a); q.cur = a;   // in the document, so the play/pause listeners (barge-in) see it
-        var done = function(){ a.remove(); if (q.cur === a) q.cur = null; playNext(sid); };
+        var line = null, done = function(){ a.remove(); if (q.cur === a) q.cur = null; playNext(sid); };
         a.addEventListener('ended', done); a.addEventListener('error', done);
-        var p = a.play(); if (p && p.catch) p.catch(function(){ show('tap the page once to allow audio', sid); });
-    }   // server verdict on the last sent utterance that paused a reply
+        var p = a.play(); if (p && p.catch) p.catch(function(e){ if (!e || e.name !== 'NotAllowedError') return; show('tap the page once to allow audio', sid); if (line) line.classList.add('cm-cap-miss'); done(); });   // AbortError is a barge-in pause, not a block
+        line = caption(sid, d.text);   // after play(): the caption shows what is being said and never decides whether it is said
+    }
 
+    // --- captions: each segment's text as it starts playing, and segments that could not be spoken ---
+    function capBox(sid){
+        var f = document.querySelector('.cm-form[data-cm-sid="' + sid + '"]'), shell = f && f.closest('.cm-shell');
+        if (!shell || !copt(sid, 'captions')) return null;
+        var c = shell.querySelector('.cm-cap');
+        if (!c) { var foot = f.closest('.cm-footer'); c = document.createElement('div'); c.className = 'cm-cap'; c.setAttribute('role', 'log'); c.setAttribute('aria-label', 'Spoken reply captions'); foot.parentNode.insertBefore(c, foot); }   // into the footer's own parent (.cm-shell-inner), directly above it
+        return c;
+    }
+    function caption(sid, text, cls){
+        var c = text && capBox(sid); if (!c) return null;
+        var now = c.querySelector('.cm-cap-now'), l = document.createElement('div');
+        if (now) now.classList.remove('cm-cap-now');
+        l.className = 'cm-cap-line cm-cap-now' + (cls ? ' ' + cls : ''); l.textContent = text; c.appendChild(l);
+        while (c.children.length > copt(sid, 'caption_lines')) c.removeChild(c.firstChild);
+        c.scrollTop = c.scrollHeight;
+        return l;
+    }    
+    
     // --- reply output: element sources -> analyser (the echo reference) -> sink -> WebRTC loopback (or the speakers until it connects / if it cannot) ---
     function out(){
         if (O) return O;
@@ -1065,7 +1119,9 @@ window.cmVoice = window.cmVoice || (function(){
         return true;
     }
 
-    function opt(k){ return (S && S.cfg[k] !== undefined && S.cfg[k] !== null && S.cfg[k] !== '') ? Number(S.cfg[k]) : D[k]; }
+    function pick(c, k){ return (c && c[k] !== undefined && c[k] !== null && c[k] !== '') ? Number(c[k]) : D[k]; }
+    function opt(k){ return pick(S && S.cfg, k); }
+    function copt(sid, k){ var b = document.querySelector('.cm-form[data-cm-sid="' + sid + '"] .cm-mic'); return pick(b && JSON.parse(b.dataset.cmVoice), k); }   // a chat's own setting when no mic session is open
     function show(t, sid){ var el = document.getElementById('cm-vad-' + (sid || (S && S.cfg.sid))); if (el) el.textContent = t; }
     function db(x){ var s = 0; for (var i = 0; i < x.length; i++) s += x[i] * x[i]; return 10 * Math.log10(s / x.length + 1e-12); }
     function frames(ms){ return Math.ceil(ms / 20); }
@@ -1136,11 +1192,11 @@ window.cmVoice = window.cmVoice || (function(){
         var rec = S.rec.slice(0, S.rec.length - Math.max(0, S.below - 10)), paused = S.paused, voicedMs = S.voiced * 20;
         S.rec = []; S.state = 'listening'; S.above = 0; S.vrun = 0; S.paused = [];
         if (voicedMs < opt('min_voiced_ms')) { resume(paused); show('ignored - no clear speech'); return; }
-        if (paused.length) {
-            var shell = S.btn.closest('.cm-shell'), stop = shell && shell.querySelector('.cm-working.cm-on [hx-post]');
+        var shell = S.btn.closest('.cm-shell'), stop = shell && shell.querySelector('.cm-working.cm-on [hx-post]');
+        if (paused.length || (stop && opt('merge_running'))) {   // a reply playing, or a turn still being written: this utterance continues it, and the server's verdict decides
             if (stop) stop.click();
             P = {sid: S.cfg.sid, els: paused};
-        }
+        }                
         send(rec);
     }
 
@@ -1150,6 +1206,7 @@ window.cmVoice = window.cmVoice || (function(){
         var x = new Float32Array(n), o = 0;
         frames_.forEach(function(f){ x.set(f, o); o += f.length; });
         show(S.mode === 'call' ? 'sent - listening' : 'sent');
+        if (AQ[S.cfg.sid]) AQ[S.cfg.sid].spoken = false;        
         htmx.ajax('POST', '/im/in', {values: {type: S.cfg.intent, cid: S.cfg.sid, branch: S.cfg.branch, lvl: S.cfg.lvl, audio_b64: wav(x, M.rate)}, swap: 'none'});
     }
 
@@ -1612,7 +1669,7 @@ class PortalEditor:
         s = doc.get("settings", {})
         s.update(settings)
         def _to_bool(v): return v.lower() in ("true", "1", "on") if isinstance(v, str) else bool(v)
-        return {"view": str(s.get("view","edit")), "font": str(s.get("font", "Bitter")), "wrap": _to_bool(s.get("wrap", True)), "zoom": max(0.6, min(float(s.get("zoom", 1.0)), 2.0)), "border": _to_bool(s.get("border", False)), "interactive": _to_bool(s.get("interactive", True)) }
+        return {"view": str(s.get("view","edit")), "font": str(s.get("font", "Bitter")), "wrap": _to_bool(s.get("wrap", True)), "zoom": max(0.6, min(float(s.get("zoom", 1.0)), 2.0)), "border": _to_bool(s.get("border", False)), "interactive": _to_bool(s.get("interactive", True)), "live": _to_bool(s.get("live", True))}
 
     def _get_action_url(self, action_name: str, did: str) -> tuple[str, str]:
         if self.IM: return "/im/in", f"""hx-vals='{{"type":"{self.intent_prefix}_{action_name}", "branch":"{did}", "lvl":{self.nesting_level}}}'"""
@@ -1635,8 +1692,10 @@ class PortalEditor:
         toggle_url, _ = self._get_action_url("toggle_task", did)
         listener_js = f"""<script>(function(){{var el=document.getElementById('editor-shell-{did}');if(el&&!el.dataset.mdTaskBound){{el.dataset.mdTaskBound='1';el.addEventListener('md-task-toggle',function(e){{var v=Object.assign({{}}, {payload},{{idx:e.detail.idx}});htmx.ajax('POST','{toggle_url}',{{target:'#editor-preview-{did}',swap:'innerHTML',values:v}});}});}}}})();</script>"""
         return f"""{style_tag}
-                   <div id="editor-shell-{did}" class="editor-shell {layout_class}" style="{border_style}">
+        		   <div id="editor-shell-{did}" class="editor-shell {layout_class}" style="{border_style}">
                        {self.toolbar_html(doc, s)}
+                       <div id="editor-info-popup-{did}" class="editor-info-popup"></div>
+                       <div id="editor-help-{did}" class="editor-info-popup" style="display:none">{self.help_html()}</div>
                        <div id="editor-search-{did}" style="flex-shrink:0;"></div>
                        <div class="editor-content-wrapper">{self.content_html(doc, s)}</div>
                        {self.bottom_bar_html(did, s)}
@@ -1681,13 +1740,12 @@ class PortalEditor:
                            {self._settings_btn(did, "&#x21AA;", "Toggle word wrap", {"wrap": not wrap}, active=wrap)}
                            {self._settings_btn(did, "Aa" if font=="mono" else "Tt", "Toggle font style", {"font": "prose" if font=="mono" else "mono"})}
                            {self._settings_btn(did, "&#x25A2;", "Toggle boundary border", {"border": not border}, active=border)}
+                           {self._settings_btn(did, "&#x270E;", "Toggle live formatting in the editor", {"live": not settings["live"]}, active=settings["live"])}
                            <button class="btn-icon" title="Search within document" hx-post="{url_search}" {vals_search} hx-target="#editor-search-{did}" hx-swap="innerHTML">&#x1F50D;</button>
-                           <button class="btn-icon" title="Document statistics" hx-post="{url_info}" {vals_info} hx-target="#editor-info-popup-{did}" hx-swap="innerHTML">&#x2139;</button>
+                           <button class="btn-icon" title="Document statistics (press again to close)" hx-post="{url_info}" {vals_info} hx-target="#editor-info-popup-{did}" hx-swap="innerHTML" hx-on::before-request="var p=document.getElementById('editor-info-popup-{did}');if(p.innerHTML.trim()){{p.innerHTML='';event.preventDefault();}}">&#x2139;</button>
                            {clean_btn}{save_btn}{download_btn}{print_btn}{bottombar_toggle}{help_btn}{ai_btn}
                        </div>
                        <span id="editor-clean-sink-{did}" style="display:none"></span>
-                       <div id="editor-info-popup-{did}" class="editor-info-popup"></div>
-                       <div id="editor-help-{did}" class="editor-info-popup" style="display:none">{self.help_html()}</div>
                    </div>"""
 
     def quick_insert_bar_html(self, did: str) -> str:
@@ -1704,7 +1762,7 @@ class PortalEditor:
         return f"""<div id="editor-bottombar-{did}" class="editor-bottombar" style="display:none;">{interactive_btn}{quick}</div>"""
 
     def help_html(self) -> str:
-        items = [("&#x1F4BE;","Save now"), ("&#x1F9F9;","Clean corrupted characters"), ("&#x2B07;","Download"), ("&#x1F5A8;","Print"), ("&#x2212;/&#x2b;","Zoom"), ("&#x21AA;","Word wrap"), ("Aa/Tt","Font style"), ("&#x25A2;","Boundary border"),("&#x1F50D;","Search"), ("&#x2139;","Document info"), ("&#x2295;","Quick-insert / interactive toolbar"), ("&#x1F517;","Clickable checkboxes (view mode)"), ("&#x21E5;/&#x21E4;","Indent / outdent current line")]
+        items = [("&#x1F4BE;","Save now"), ("&#x1F9F9;","Clean corrupted characters"), ("&#x2B07;","Download"), ("&#x1F5A8;","Print"), ("&#x2212;/&#x2b;","Zoom"), ("&#x21AA;","Word wrap"), ("Aa/Tt","Font style"), ("&#x25A2;","Boundary border"),("&#x1F50D;","Search"), ("&#x2139;","Document info"), ("&#x2295;","Quick-insert / interactive toolbar"), ("&#x1F517;","Clickable checkboxes (view mode)"), ("&#x21E5;/&#x21E4;","Indent / outdent current line"), ("&#x270E;","Live formatting in the editor")]
         rows = "".join(f'<div style="display:flex;gap:.5rem;padding:.15rem 0"><span style="min-width:2.2rem">{i}</span><span style="color:var(--text_muted)">{UI.escape(l)}</span></div>' for i,l in items)
         return f"""<div class="glass" style="padding:.6rem .8rem;font-size:.75rem"><div style="font-weight:600;margin-bottom:.3rem">Toolbar Icons</div>{rows}<button type="button" class="ui-btn" style="width:100%;margin-top:.5rem;justify-content:center" onclick="this.closest('.editor-info-popup').style.display='none'">Close</button></div>"""
         
@@ -1727,7 +1785,7 @@ class PortalEditor:
         url_save, vals_save = self._get_action_url("save", did)
         dirty_js = f"document.getElementById('editor-dirty-{did}').style.display='inline'"
         clean_js = f"document.getElementById('editor-dirty-{did}').style.display='none'"
-        textarea = f"""<textarea id="doc-textarea-{did}" name="content" class="doc-textarea {wrap_class}" style="{font_size}" oninput="{dirty_js}" onkeydown="peKeydown(event,'{did}')" hx-post="{url_save}" {vals_save} hx-trigger="keyup changed delay:{self.autosave_delay}, blursave" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-include="this" hx-on::after-request="{clean_js}">{content_val}</textarea><span id="editor-autosave-{did}" style="display:none"></span>"""
+        textarea = f"""<textarea id="doc-textarea-{did}" name="content" class="doc-textarea {wrap_class}" style="{font_size}" data-live="{1 if settings["live"] else 0}" oninput="{dirty_js}" onkeydown="peKeydown(event,'{did}')" hx-post="{url_save}" {vals_save} hx-trigger="keyup changed delay:{self.autosave_delay}, blursave" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-include="this" hx-on::after-request="{clean_js}">{content_val}</textarea><span id="editor-autosave-{did}" style="display:none"></span>"""
         rendered_preview = self.render_preview(doc.get("content",""), zoom = zoom, task_interactive = settings.get("interactive", False), doc_id=did, path=doc.get("path",""), **self.render_kwargs_fn())
         if self.IM:
             preview = f"""<div id="editor-preview-{did}" class="editor-scroll-area font-{font}">{rendered_preview}</div>"""
@@ -1819,7 +1877,7 @@ class PortalEditor:
     async def _im_settings(self, request, payload, imr):
         doc = await self._get_doc_from_state(request, payload)
         current_settings = doc.get("settings", {})
-        for k in ("view","wrap","font","zoom","border","interactive"):
+        for k in ("view","wrap","font","zoom","border","interactive","live"):
             if k in payload: current_settings[k] = payload[k]
         doc["settings"] = current_settings
         if "content" in payload and self.fm and self.get_tab:
@@ -1902,6 +1960,8 @@ class SettingField:
             except TypeError: return self.options()
         return self.options
 
+class SettingsError(ValueError): """A form value that cannot be stored as its field's type - raised instead of silently storing the default."""
+    
 class SettingsGroup:
     def __init__(self, name, label, fields, json_path):
         self.name = name
@@ -1937,9 +1997,10 @@ class SettingsGroup:
                 except Exception: data[f.name] = f.default
             elif f.type == "json":
                 if isinstance(raw, (dict, list)): data[f.name] = raw
-                else:
-                    try: data[f.name] = json.loads(raw) if raw and raw.strip() else f.default
-                    except Exception: data[f.name] = f.default or {}
+                elif raw and raw.strip():
+                    try: data[f.name] = json.loads(raw)
+                    except ValueError as e: raise SettingsError(f"""{f.label}: not valid JSON ({e})""") from e
+                else: data[f.name] = f.default
             else:
                 data[f.name] = raw if raw is not None else f.default
         return data
@@ -1998,6 +2059,45 @@ class SettingsPanel:
                        {body_html}
                     </div>"""
 
+# --- Tagged Text ---
+# Model output may carry a few known tags: <lang code="xx">...</lang> speaks the text inside with that language's voice; whitelisted action tags (e.g. <remember>...</remember>, <sample name="..."/>) are instructions for a module, never spoken or shown.
+# tag_at reads one tag at the start of a string, so a streaming reader can wait while a tag is still arriving; parse_tagged reads a whole text.
+
+_TAG_RE = re.compile(r"""<(/?)([A-Za-z][\w-]*)((?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>/]+))*)\s*(/?)>""")
+_TAG_ATTR_RE = re.compile(r"""([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+))""")
+_TAG_PARTIAL_RE = re.compile(r"""</?(?:[A-Za-z][\w-]*(?:\s[^<>]*)?)?""")
+
+def tag_at(text: str, names) -> tuple:
+    """(tag, length) when text starts with a tag named in names: tag = {name, close, attrs, body}; an opening action tag includes its body up to the closing tag.
+    (None, 0) = a known tag may still be arriving (wait for more text); (None, -1) = not a known tag, so the "<" is ordinary text."""
+    m = _TAG_RE.match(text)
+    if not m: return (None, 0) if len(text) < 200 and _TAG_PARTIAL_RE.fullmatch(text) else (None, -1)
+    name = m.group(2).lower()
+    if name not in names: return None, -1
+    tag = {"name": name, "close": m.group(1) == "/", "attrs": {k: a or b or c for k, a, b, c in _TAG_ATTR_RE.findall(m.group(3))}, "body": ""}
+    if tag["close"] or m.group(4) or name == "lang": return tag, m.end()
+    j = text.lower().find(f"</{name}>", m.end())
+    if j < 0: return None, 0
+    return {**tag, "body": text[m.end():j].strip()}, j + len(name) + 3
+
+def parse_tagged(text: str, action_names) -> dict:
+    """Whole-text reading: {"runs": [(lang, text), ...] in order (lang "" = the default voice), "actions": [{name, attrs, body}], "plain": the text without any known tag}. An unfinished tag at the end is dropped."""
+    names, runs, actions, lang, cur, plain, rest = {str(n).lower() for n in action_names} | {"lang"}, [], [], "", "", "", str(text)
+    while rest:
+        i = rest.find("<")
+        if i < 0: cur += rest; break
+        cur, rest = cur + rest[:i], rest[i:]
+        tag, n = tag_at(rest, names)
+        if n == 0: break
+        if n < 0: cur, rest = cur + "<", rest[1:]; continue
+        rest = rest[n:]
+        if tag["name"] == "lang":
+            if cur.strip(): runs.append((lang, cur.strip()))
+            plain, cur, lang = plain + cur, "", "" if tag["close"] else str(tag["attrs"].get("code", "")).lower()
+        elif not tag["close"]: actions.append({k: tag[k] for k in ("name", "attrs", "body")})
+    if cur.strip(): runs.append((lang, cur.strip()))
+    return {"runs": runs, "actions": actions, "plain": re.sub(r"[ \t]{2,}", " ", plain + cur).strip()}    
+    
 # --- Atomic JSON Writes ---
 
 def write_json_atomic(path, data, indent=2):
@@ -2775,3 +2875,4 @@ async function pbSaveAs(btn){
     wrap.outerHTML = await r.text();
 }
 """
+
