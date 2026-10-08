@@ -1,6 +1,6 @@
 # built_ins.py
 
-import re, json, uuid, difflib, os, html, shutil, asyncio, time, copy, base64
+import re, json, uuid, difflib, os, html, shutil, asyncio, time, copy, base64, datetime
 import base64
 import mimetypes
 import hashlib
@@ -2097,6 +2097,53 @@ def parse_tagged(text: str, action_names) -> dict:
         elif not tag["close"]: actions.append({k: tag[k] for k in ("name", "attrs", "body")})
     if cur.strip(): runs.append((lang, cur.strip()))
     return {"runs": runs, "actions": actions, "plain": re.sub(r"[ \t]{2,}", " ", plain + cur).strip()}    
+    
+# --- Data Bundles (backup and transfer between portal instances) ---
+# A module declares parts {name: (label, export_fn(username, ctx) -> data, import_fn(username, ctx, data, replace) -> note)}; DataBundle renders the controls and handles both directions through intents.
+# Export answers with a download link (data URL), so no route is needed. Import reads the chosen file in the browser into a form field, writes a backup bundle of the chosen parts, then applies them part by part.
+# ctx is whatever the module needs to locate its data (e.g. {"sid": ...}); it rides in the intents as JSON.
+
+DATA_BUNDLE_CSS = """
+.bundle-row{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.25rem 0;}
+"""
+
+DATA_BUNDLE_JS = r"""
+function bundleFileToField(input){ var f = input.files && input.files[0], field = input.form.querySelector('[name=bundle]'); if (!f) return; var r = new FileReader(); r.onload = function(){ field.value = r.result; }; r.readAsText(f); }
+"""
+
+class DataBundle:
+    """Bundle file: {"kind": "portal-bundle:<name>", "version": 1, "created", "from", "parts": {part: data}}. on_import(request, ctx, imr) lets the module re-render after an import."""
+    def __init__(self, name: str, IM, parts: dict, backup_dir, nesting_level: int = 2, on_import=None):
+        self.name, self.IM, self.parts, self.backup_dir, self.lvl, self.on_import = name, IM, parts, Path(backup_dir), nesting_level, on_import
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        IM.scripts.update({f"{name}_bundle_export": [self._im_export], f"{name}_bundle_import": [self._im_import]})
+
+    def _vals(self, action: str, ctx: dict) -> str: return json.dumps({"type": f"{self.name}_bundle_{action}", "lvl": self.lvl, "ctx": json.dumps(ctx)})
+    def _chosen(self, payload) -> list: v = payload.get("parts", []); return [p for p in (v if isinstance(v, list) else [v]) if p in self.parts]
+    def _bundle(self, username: str, ctx: dict, parts: list) -> dict: return {"kind": f"portal-bundle:{self.name}", "version": 1, "created": datetime.utcnow().isoformat(), "from": username, "parts": {p: self.parts[p][1](username, ctx) for p in parts}}
+
+    def panel_html(self, ctx: dict) -> str:
+        checks = "".join(f"""<label class="status-label"><input type="checkbox" name="parts" value="{k}" checked> {v[0]}</label>""" for k, v in self.parts.items())
+        return f"""<form class="bundle-row" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{self._vals("export", ctx)}' hx-include="this">{checks}<button type="submit" class="ui-btn">Export</button><span id="{self.name}-bundle-link"></span></form>
+                   <form class="bundle-row" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{self._vals("import", ctx)}' hx-include="this" hx-confirm="Import this bundle? A backup of the chosen parts is saved first.">{checks}<select name="mode"><option value="merge">Merge into current</option><option value="replace">Replace current</option></select><input type="file" accept=".json" onchange="bundleFileToField(this)"><input type="hidden" name="bundle"><button type="submit" class="ui-btn">Import</button></form>
+                   <div id="{self.name}-bundle-status" class="status-label">Import first saves a backup bundle of the chosen parts, so it can be undone by importing that file.</div>"""
+
+    async def _im_export(self, request, payload, imr):
+        username, ctx = request.state.user.username, json.loads(payload.get("ctx") or "{}")
+        data = base64.b64encode(json.dumps(self._bundle(username, ctx, self._chosen(payload)), indent=1).encode()).decode()
+        name = f"""{self.name}-{Path(username).name}-{datetime.utcnow().strftime("%Y%m%d-%H%M")}.json"""
+        return imr.oob(f"""<a class="ui-btn" href="data:application/json;base64,{data}" download="{name}">Download {name}</a>""", f"{self.name}-bundle-link")
+
+    async def _im_import(self, request, payload, imr):
+        username, ctx = request.state.user.username, json.loads(payload.get("ctx") or "{}")
+        b = json.loads(payload.get("bundle") or "{}")
+        if b.get("kind") != f"portal-bundle:{self.name}": return imr.oob('<span class="err-box">Not imported - pick a bundle file exported from this module.</span>', f"{self.name}-bundle-status")
+        parts = [p for p in self._chosen(payload) if p in b.get("parts", {})]
+        backup = self.backup_dir / Path(username).name / f"""{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}.json"""
+        backup.parent.mkdir(parents=True, exist_ok=True); write_json_atomic(backup, self._bundle(username, ctx, parts), indent=1)
+        notes = [self.parts[p][2](username, ctx, b["parts"][p], payload.get("mode") == "replace") for p in parts]
+        if self.on_import: await self.on_import(request, ctx, imr)
+        return imr.oob(f"""<span class="status-label">&#x2713; Imported {html.escape("; ".join(notes) or "nothing (the bundle has none of the chosen parts)")} - backup: {backup.name}</span>""", f"{self.name}-bundle-status")    
     
 # --- Atomic JSON Writes ---
 

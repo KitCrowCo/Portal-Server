@@ -253,3 +253,6 @@ textarea.cm-input, textarea.module-select { min-height: 5rem; max-height: 50vh; 
 #cap-editor .glass { padding: 0.4rem !important; margin-bottom: 0.3rem !important; }
 #cap-editor form { gap: 0.25rem !important; }
 #cap-editor label { margin: 0; }
+
+.list-card-hd{flex-wrap:wrap;}
+.list-card-title{flex:1 1 8rem;min-width:8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
