@@ -997,12 +997,10 @@ CHAT_VOICE_CSS = """
 #      only learn), and the mic counts as talking only when it is clearly louder than that learned echo;
 #   3. talkover = 0 ignores the mic entirely while a reply plays (half-duplex).
 # Coming back to the page (visibilitychange) resumes suspended audio; a call whose mic the browser stopped in the background reopens it and re-measures the room.
-# While a reply plays, starting also needs the stricter barge-in margin held for bargein_ms; the reply is then paused, not stopped. If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply
-# resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
-# Replies spoken while they are written arrive as `cm-voice-audio` triggers {sid, turn, seq, audio_b64, format, text, last}: segments are queued by seq per
-# chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply). 
+# While a reply plays, starting also needs the stricter barge-in margin held for bargein_ms; the reply is then paused, not stopped. If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
+# Replies spoken while they are written arrive as `cm-voice-audio` triggers {sid, turn, seq, audio_b64, format, text, lang, voice, error, last}: segments are queued by seq per chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply). 
 # A newer turn's speech replaces an older turn's (the older one stops, and its late segments are ignored); a sent utterance that stopped a reply drops the rest of that turn.
-# Captions: each segment's text is shown in a .cm-cap box above the footer as it starts playing; a segment that could not be spoken (no audio, or autoplay blocked) is shown marked.
+# Captions: each segment's text is shown in a .cm-cap box above the footer as it starts playing; a segment that could not be spoken (no audio, or autoplay blocked) is shown marked. 
 # merge_running: an utterance that ends while a turn is still running (even before any audio) presses Stop like a barge-in, so a prompt split by a pause is answered once; the server's transcript verdict still decides.
 # A pushed reply whose autoplay copy would repeat speech already streamed as segments is stopped once and logged to the console.# Raw string: the JS must reach the browser byte for byte.
 CHAT_VOICE_JS = r"""
@@ -1059,7 +1057,7 @@ window.cmVoice = window.cmVoice || (function(){
         if (S && S.mode === 'call' && S.state === 'speaking') { setTimeout(function(){ playNext(sid); }, 300); return; }   // never start the next sentence over someone talking
         var d = q.parts[q.next]; if (!d) return;
         delete q.parts[q.next]; q.next++;
-        if (!d.audio_b64) { caption(sid, d.text, 'cm-cap-miss'); playNext(sid); return; }   // a segment the speech node failed on is shown, not spoken; the order holds
+        if (!d.audio_b64) { caption(sid, d.error ? d.text + ' [not spoken - ' + d.error + ']' : d.text, 'cm-cap-miss'); if (d.error) console.warn('cmVoice: segment ' + d.seq + ' (' + (d.lang || 'default language') + ', voice ' + (d.voice || 'node default') + ') not spoken - ' + d.error); playNext(sid); return; }   // a segment the speech node failed on is shown with the reason, not spoken; the order holds
         var a = document.createElement('audio'); a.className = 'cm-audio'; a.style.display = 'none'; a.src = 'data:audio/' + (d.format || 'wav') + ';base64,' + d.audio_b64;
         document.body.appendChild(a); q.cur = a;   // in the document, so the play/pause listeners (barge-in) see it
         var line = null, done = function(){ a.remove(); if (q.cur === a) q.cur = null; playNext(sid); };
