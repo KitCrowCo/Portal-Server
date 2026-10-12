@@ -2006,8 +2006,8 @@ class SettingsGroup:
     def _render_field(self, f, values: dict, fm=None, name_prefix: str = "") -> str:
         val = values.get(f.name, f.default)
         hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
-        # hx_attr = f' hx-get="{f.hx_get}" hx-target="{f.hx_target}" hx-trigger="change" hx-include="this"' if (f.hx_get and f.hx_target) else ""
-        hx_attr = f""" hx-post="/im/in" hx-vals='{{"type":"{f.hx_intent}"}}' hx-target="{f.hx_target}" hx-trigger="change" hx-include='closest form'""" if (f.hx_intent and f.hx_target) else ""
+        tgt = 'hx-swap="none"' if f.hx_target == "none" else f'''hx-target="{f.hx_target}"'''   # "none": the intent answers with OOB swaps only, so there is no main swap to empty its target
+        hx_attr = f""" hx-post="/im/in" hx-vals='{{"type":"{f.hx_intent}"}}' {tgt} hx-trigger="change" hx-include='closest form'""" if (f.hx_intent and f.hx_target) else ""        
         fname = f"{name_prefix}{f.name}"
         if f.type == "select":
             opts = "".join(f'<option value="{html.escape(str(v))}" {"selected" if str(val)==str(v) else ""}>{html.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in f.get_options(values)))
