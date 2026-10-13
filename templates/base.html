@@ -85,8 +85,9 @@
                 {% set accessibility_toolbar_content %}
                     <div id="im-bridge-outer">
                         <button id="im-bridge-toggle" onclick="IB.toggle()" title="Input Bridge - universal action toolbar">&#x2303; Bridge</button>
-                        <span id="im-status-bar"></span>
-                        <div id="im-bridge-wrapper"><div id="im-bridge-bar"></div></div>
+                       <span id="im-status-bar"></span>
+                       <div id="im-bridge-wrapper"><div id="im-bridge-bar"></div></div>
+                       {{ bridge_slots(user)|safe }}
                     </div>
                     <div id="im-bridge-state" style="display:none;"></div>
                 {% endset %}

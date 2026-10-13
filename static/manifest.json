@@ -6,6 +6,12 @@
     "display": "standalone",
     "background_color": "#020408",
     "theme_color": "#020408",
+    "share_target": {
+        "action": "/tool/muninn/share",
+        "method": "POST",
+        "enctype": "multipart/form-data",
+        "params": {"title": "title", "text": "text", "url": "url"}
+    },
     "icons": [
         {
             "src": "/static/icon-192.png",

@@ -228,7 +228,8 @@ def load_modules(module_type="module"):
                                "push_to_client":   push_to_client,
                                "encrypt_token":    encrypt_token,
                                "decrypt_token":    decrypt_token,
-                               "refresh_system":   create_refresh_callback}
+                               "refresh_system":   create_refresh_callback,
+                               "register_bridge_slot": register_bridge_slot}
         if module_type == "tool" and os.path.exists(f"{module_path}/{item}.py"):
             try:
                 module_name = f"tools.{item}.{item}"
@@ -258,6 +259,10 @@ def refresh_modular_router(primary_router, middle_router_instance, prefix):
 # -- Module & Tool Loader --
 
 Tools = {"built_ins": bf}
+BRIDGE_SLOTS = {}   # name -> fn(user) -> html: controls a tool or module adds to the Input Bridge row on every page (e.g. Muninn's capture box)
+
+def register_bridge_slot(name: str, fn): BRIDGE_SLOTS[name] = fn
+templates.env.globals.update(bridge_slots=lambda user: "".join(fn(user) for fn in BRIDGE_SLOTS.values()))
 
 def get_module_list(module_type="module"):
     modules_path = f"./{module_type}s"

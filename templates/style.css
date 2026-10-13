@@ -15,6 +15,11 @@ html, body {
     scrollbar-color: var(--border) transparent;
 }
 
+/* ui_scale (theme variable, default 1): scales everything sized in rem - set it per person in Control Panel > Appearance (e.g. 0.7 for a compact layout). 100% keeps the browser's own text size setting as the base. */
+html { font-size: calc(100% * var(--ui_scale, 1)); }
+body { font-size: 1rem; }
+button, input, select, textarea { font-size: .8rem; }   /* browsers give form controls a fixed size of their own (about 12px); this keeps them near it while following ui_scale */
+
 body {
     display: flex;
     flex-direction: column;
@@ -261,3 +266,10 @@ textarea.cm-input, textarea.module-select { min-height: 5rem; max-height: 50vh; 
 
 .list-card-hd{flex-wrap:wrap;}
 .list-card-title{flex:1 1 8rem;min-width:8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* -- General layout helpers (any module) -- */
+.row { display:flex; align-items:center; gap:.3rem; flex-wrap:wrap; }
+.grow { flex:1; min-width:0; }
+.row .module-select { margin:0; width:auto; }   /* inputs in a row sit on the row's line; .grow makes one take the remaining width */
+.row input[type=number].module-select { width:6rem; }
+.scroll-pane { height:100%; overflow-y:auto; padding:.3rem .4rem; box-sizing:border-box; }

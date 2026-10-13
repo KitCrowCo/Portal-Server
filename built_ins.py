@@ -810,7 +810,9 @@ class TabManager:
         if not isinstance(tabs, dict): tabs = state["tabs"] = {}
         if not tabs:
             if self.empty["tabs"]: state["tabs"] = copy.deepcopy(self.empty["tabs"])
-            else: state["tabs"][fallback_id] = {"id": f"tab-{uuid.uuid4().hex[:6]}", "order": 0, "label": "Home", "path": "/launcher"}
+            else:
+                fallback_id = f"tab-{uuid.uuid4().hex[:6]}"
+                state["tabs"][fallback_id] = {"id": fallback_id, "order": 0, "label": "Home", "path": "/launcher"}
         active = state.get("active")
         if not active or active not in state["tabs"]:
             ordered_tabs = sorted(state["tabs"].values(), key=lambda t: t.get("order", 0) if isinstance(t, dict) else 0)
