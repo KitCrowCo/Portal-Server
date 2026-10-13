@@ -243,7 +243,8 @@
                 document.addEventListener('keydown', function(e) { if (e.key !== 'Escape') return; document.querySelectorAll('.tree-ctx-menu').forEach(function(m) { m.style.display = 'none'; }); });
 
                 // portal_init: tells server to seed nav state and push focused trigger for the active tab's content. Includes shell_uuid so server targets the correct content div.
-                htmx.ajax('POST', '/im/in', {values: {type: 'portal_init', target: 'content-{{ shell_uuid }}'}, swap: 'none'});
+                // Sent once htmx has processed the page (DOMContentLoaded): a request started earlier is counted on <body> before htmx initializes it, so <body> keeps the htmx-request class afterwards and every .htmx-indicator on every page shows as working.
+                document.addEventListener('DOMContentLoaded', function() { htmx.ajax('POST', '/im/in', {values: {type: 'portal_init', target: 'content-{{ shell_uuid }}'}, swap: 'none'}); });
             </script>
         </body>
     </html>

@@ -148,6 +148,8 @@ def _extract_tabsets(lines: list[str]) -> tuple[list[str], list[dict]]:
 MD_BLOCK_CSS = """
 .graphviz-wrapper{background:transparent;max-width:100%;overflow:auto;}
 .graphviz-wrapper svg{max-width:100%;height:auto;display:block;}
+.graphviz-copy-btn,.graphviz-copy-dot{position:absolute; top:.2rem; right:.2rem; z-index:5; background:var(--bg_panel); border:var(--border-thick) solid var(--border); color:var(--text_muted); border-radius:.3rem; padding:.1rem .3rem; cursor:pointer; font-size:.7rem;}
+.graphviz-copy-btn:hover,.graphviz-copy-dot:hover{color:var(--accent); border-color:var(--accent);}
 .md-details{border:var(--border-thick) solid var(--border);border-radius:var(--radius);margin:.5rem 0;overflow:hidden;}
 .md-details summary{cursor:pointer;padding:.4rem .6rem;font-weight:600;list-style:none;user-select:none;}
 .md-details summary::-webkit-details-marker{display:none;}
@@ -355,7 +357,16 @@ def render_graphviz_block(dot_src: str, theme: dict = None) -> str:
         inject = f'graph [bgcolor="transparent" fontcolor="{text_color}"]; node [fontcolor="{text_color}" color="{muted_color}"]; edge [color="{muted_color}" fontcolor="{muted_color}"]; '
         injected = re.sub(r'(di)?graph(\s+\w*)?\s*\{', lambda m: f"{m.group(0)}{inject}", dot_src, count=1)
         svg = graphviz.Source(injected).pipe(format="svg").decode("utf-8")
-        return f'<div class="graphviz-wrapper">{svg}</div>'
+        # HTML-escape the DOT source for safe display in a hidden textarea
+        escaped_dot = UI.escape(dot_src)
+        return f'''<div class="graphviz-wrapper">
+<div style="position:relative;">
+{svg}
+<textarea class="graphviz-dot-source" aria-hidden="true">{escaped_dot}</textarea>
+<button type="button" class="graphviz-copy-btn" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('svg').textContent||this.closest('.graphviz-wrapper').querySelector('svg').innerHTML||'')" title="Copy SVG">&#x2398;</button>
+<button type="button" class="graphviz-copy-dot" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('.graphviz-dot-source').value||'')" title="Copy DOT">&#x2715;</button>
+</div>
+</div>'''
     except Exception:
         return f'<pre class="code-block"><code class="lang-dot">{UI.escape(dot_src)}</code></pre>'
 
