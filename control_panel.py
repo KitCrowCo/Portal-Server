@@ -508,9 +508,28 @@ async def cp_theme_switch(request: Request, theme_mode: str = Form(...), db: Ses
     """A built-in theme by key, or one of this user's saved themes as 'saved:<name>'."""
     chosen = (await _saved_themes(request)).get(theme_mode[6:]) if theme_mode.startswith("saved:") else DEFAULT_THEMES.get(theme_mode)
     if not chosen: return HTMLResponse("Unknown theme", status_code=400)
-    user.custom_theme = chosen
+    user.custom_theme = _keep_scale(user, chosen)
     db.commit()
     return HTMLResponse("OK")
+
+# --- Text size (ui_scale for larger screens, ui_scale_phone for phones; kept in the person's theme, carried across theme switches) ---
+
+def _keep_scale(user, theme: dict) -> dict: return {**theme, **{k: v for k, v in (getattr(user, "custom_theme", None) or {}).items() if k.startswith("ui_scale")}}
+
+def _scale_pct(t: dict, key: str) -> int: return round(float(t.get(key) or t.get("ui_scale") or 1) * 100)
+
+def ui_scale_html(t: dict) -> str:
+    """The value shown beside the Text size buttons: larger screens / phones."""
+    return f"""{_scale_pct(t, "ui_scale")}% &#xB7; phone {_scale_pct(t, "ui_scale_phone")}%"""
+
+@router.post("/ui_scale", response_class=HTMLResponse)
+async def cp_ui_scale(request: Request, step: int = Form(0), phone: str = Form("false"), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Text size for the kind of screen the buttons were pressed on, in 10% steps (60% - 200%); the page follows at once."""
+    key, cur = "ui_scale_phone" if phone == "true" else "ui_scale", dict(user.custom_theme or {})
+    cur[key] = str(round(min(2.0, max(0.6, _scale_pct(cur, key) / 100 + 0.1 * step)), 2))
+    user.custom_theme = cur
+    db.commit()
+    return HTMLResponse(f"""<style id="ui-scale-live" hx-swap-oob="true">:root {{ --ui_scale: {cur.get("ui_scale", 1)}; --ui_scale_phone: {cur.get("ui_scale_phone", cur.get("ui_scale", 1))}; }}</style><span id="ui-scale-val" class="status-label" hx-swap-oob="true">{ui_scale_html(cur)}</span>""")
 
 async def _saved_themes(request) -> dict: return await get_state(request, scope="user", namespace="_theme_saved") or {}
 async def _set_saved_themes(request, data: dict): await set_state(request, data, scope="user", namespace="_theme_saved")
@@ -574,7 +593,7 @@ async def theme_saved_save(request: Request, name: str = Form(""), config: str =
 @router.post("/theme/saved_apply", response_class=HTMLResponse)
 async def theme_saved_apply(request: Request, name: str = Form(...), user=Depends(get_current_user), db: Session = Depends(get_db)):
     saved = await _saved_themes(request)
-    if name in saved: user.custom_theme = saved[name]; db.commit()
+    if name in saved: user.custom_theme = _keep_scale(user, saved[name]); db.commit()
     return await cp_appearance_fragment(request, db=db, user=user)
 
 @router.post("/theme/saved_delete", response_class=HTMLResponse)

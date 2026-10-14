@@ -1,5 +1,4 @@
 # built_ins.py
-
 import re, json, uuid, difflib, os, html, shutil, asyncio, time, copy, base64, datetime
 import base64
 import mimetypes
@@ -984,8 +983,8 @@ CHAT_CSS = """
 
 CHAT_VOICE_CSS = """
 .cm-audio{display:block;width:100%;max-width:22rem;height:2rem;margin-top:.3rem;}
-.cm-mic,.cm-call{touch-action:none;user-select:none;-webkit-user-select:none;}
-.cm-mic.active,.cm-call.active{background:var(--accent);color:var(--bg);}
+.cm-mic,.cm-call,.cm-hush{touch-action:none;user-select:none;-webkit-user-select:none;}
+.cm-mic.active,.cm-call.active,.cm-hush.active{background:var(--accent);color:var(--bg);}
 .cm-vad{font-size:.65rem;color:var(--text_muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:12rem;}
 .cm-cap{flex-shrink:0;max-height:7.5rem;overflow-y:auto;padding:.25rem .6rem;border-top:var(--border-thick) solid var(--border);font-size:.84rem;line-height:1.5;}
 .cm-cap:empty{display:none;}
@@ -1015,14 +1014,16 @@ CHAT_VOICE_CSS = """
 # A newer turn's speech replaces an older turn's (the older one stops, and its late segments are ignored); a sent utterance that stopped a reply drops the rest of that turn.
 # Captions: each segment's text is shown in a .cm-cap box above the footer as it starts playing; a segment that could not be spoken (no audio, or autoplay blocked) is shown marked. 
 # merge_running: an utterance that ends while a turn is still running (even before any audio) presses Stop like a barge-in, so a prompt split by a pause is answered once; the server's transcript verdict still decides.
-# A pushed reply whose autoplay copy would repeat speech already streamed as segments is stopped once and logged to the console.# Raw string: the JS must reach the browser byte for byte.
+# A pushed reply whose autoplay copy would repeat speech already streamed as segments is stopped once and logged to the console.
+# Mute (the speaker button, per chat and per browser, kept in localStorage): pressing it stops the current turn's speech and pauses a reply playing in that chat; while muted, streamed segments are skipped and pushed replies do not autoplay (their players still play when pressed). The turn itself keeps running - Stop is the chat's own button.
+# Raw string: the JS must reach the browser byte for byte.
 CHAT_VOICE_JS = r"""
 window.cmVoice = window.cmVoice || (function(){
     var WORKLET = "class P extends AudioWorkletProcessor{constructor(){super();this.n=0;this.a=new Float32Array(Math.round(sampleRate*0.02));this.b=new Float32Array(this.a.length)}process(i){var x=i[0];if(!x||!x[0])return true;var r=x[0],f=x[1]||x[0];for(var k=0;k<r.length;k++){this.a[this.n]=r[k];this.b[this.n]=f[k];if(++this.n===this.a.length){this.port.postMessage([this.a.slice(0),this.b.slice(0)]);this.n=0}}return true}}registerProcessor('cm-frames',P)";
     var M = null, S = null, P = null, O = null, playing = new Set(), AQ = {};
     var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500, voicing: 0.45, min_voiced_ms: 250, bargein_ms: 400, echo_margin_db: 8, talkover: 1, echo_route: 1, merge_running: 1, captions: 1, caption_lines: 4};
     
-    document.addEventListener('play', function(e){ var a = e.target; if (!(a.classList && a.classList.contains('cm-audio')) || replayed(a)) return; playing.add(a); if (S) route(a); }, true);
+    document.addEventListener('play', function(e){ var a = e.target; if (!(a.classList && a.classList.contains('cm-audio')) || hushed(a) || replayed(a)) return; playing.add(a); if (S) route(a); }, true);
     document.addEventListener('submit', function(e){ var f = e.target; if (f.classList && f.classList.contains('cm-form') && AQ[f.dataset.cmSid]) AQ[f.dataset.cmSid].spoken = false; }, true);   // a typed turn starts fresh
     ['pause', 'ended', 'emptied'].forEach(function(n){ document.addEventListener(n, function(e){ playing.delete(e.target); }, true); });
     document.addEventListener('visibilitychange', function(){ if (!document.hidden) revive(); });   // phones suspend audio in the background
@@ -1047,9 +1048,36 @@ window.cmVoice = window.cmVoice || (function(){
             if (q) { gone[q.turn] = 1; drop(q); }   // a newer turn's speech replaces an older turn's: never two at once
             q = AQ[d.sid] = {sid: d.sid, turn: d.turn, next: 0, parts: {}, cur: null, dropped: false, spoken: false, gone: gone};
         }
-        if (q.dropped || d.last) return;
+        if (q.dropped || d.last || MUTE[d.sid]) return;   // muted: the reply is still written in the chat, only its speech is skipped
         q.spoken = true; q.parts[d.seq] = d; playNext(d.sid);
-    });  
+    });
+
+    // --- mute: per chat, per browser (a phone can be muted while the desktop speaks); muting also stops what is speaking now ---
+    var MUTE = {};
+    try { MUTE = JSON.parse(localStorage.getItem('cmVoiceMute') || '{}') || {}; } catch (e) {}
+    function hush(btn, ev){
+        ev.preventDefault();
+        var sid = btn.dataset.cmSid;
+        if (MUTE[sid]) delete MUTE[sid]; else { MUTE[sid] = 1; silence(sid); }
+        try { localStorage.setItem('cmVoiceMute', JSON.stringify(MUTE)); } catch (e) {}
+        mark(sid);
+    }
+    function silence(sid){   // the current turn's speech stops for good (playing and queued); a pushed reply playing in this chat pauses
+        if (AQ[sid]) drop(AQ[sid]);
+        var f = document.querySelector('.cm-form[data-cm-sid="' + sid + '"]'), shell = f && f.closest('.cm-shell');
+        Array.from(playing).forEach(function(a){ if (shell && shell.contains(a)) a.pause(); });
+    }
+    function hushed(a){   // a pushed reply's automatic play in a muted chat is stopped; pressing play on its player still works
+        if (!a.autoplay) return false;
+        var f = a.closest('.cm-shell'), form = f && f.querySelector('.cm-form');
+        if (!form || !MUTE[form.dataset.cmSid]) return false;
+        a.autoplay = false; a.pause();
+        return true;
+    }
+    function mark(sid){ document.querySelectorAll('.cm-hush[data-cm-sid="' + sid + '"]').forEach(function(b){ var m = !!MUTE[sid]; b.classList.toggle('active', m); b.innerHTML = m ? '&#x1F507;' : '&#x1F50A;'; b.title = m ? 'Replies are muted in this chat (this browser) - tap to hear them again' : 'Stop speaking now and mute replies (the reply is still written); tap again to hear replies'; }); }
+    function marks(r){ if (r && r.querySelectorAll) r.querySelectorAll('.cm-hush').forEach(function(b){ if (MUTE[b.dataset.cmSid]) mark(b.dataset.cmSid); }); }
+    document.addEventListener('htmx:load', function(e){ marks(e.target); });   // a chat rendered later shows its stored state
+    marks(document);
     function drop(q){   // stops a turn's speech for good: what is playing and what is still queued
         if (q.dropped) return;
         if (q.cur || Object.keys(q.parts).length) caption(q.sid, 'reply cut', 'cm-cap-note');
@@ -1260,7 +1288,7 @@ window.cmVoice = window.cmVoice || (function(){
         if (M.cal > 0) show('stay quiet a moment - measuring the room');
     }
 
-    return {hold: hold, release: release, toggleCall: toggleCall};
+    return {hold: hold, release: release, toggleCall: toggleCall, hush: hush};
 })();
 """
 
@@ -1469,7 +1497,7 @@ class ChatManager:
     def _voice_html(self, sid, voice_opts=None) -> str:
         """Mic controls for the footer. voice_opts tunes call-mode detection per conversation (threshold_db, bargein_db, bargein_ms, min_db, start_ms, end_ms, preroll_ms, min_voiced_ms, voicing, max_ms, echo_margin_db, talkover, echo_route, merge_running, captions, caption_lines); unset keys use the script defaults. The audio intent's owner may push a `cm-voice` trigger {sid, heard} after transcribing: heard=false resumes a reply the utterance paused."""
         cfg = UI.escape(json.dumps({"sid": sid, "intent": self.audio_intent, "branch": self.branch_id, "lvl": self.nesting_level, **{k: v for k, v in (voice_opts or {}).items() if v not in (None, "")}}))
-        return f"""<button type="button" class="cm-qbtn cm-mic" data-cm-voice="{cfg}" onpointerdown="cmVoice.hold(this, event)" onpointerup="cmVoice.release(this)" onpointerleave="cmVoice.release(this)" onpointercancel="cmVoice.release(this)" oncontextmenu="return false" title="Hold to talk">&#x1F3A4;</button><button type="button" class="cm-qbtn cm-call" data-cm-voice="{cfg}" onpointerdown="cmVoice.toggleCall(this)" title="Call mode: talk hands-free; speaking over a reply interrupts it">&#x260E;</button><span class="cm-vad" id="cm-vad-{sid}"></span>"""
+        return f"""<button type="button" class="cm-qbtn cm-mic" data-cm-voice="{cfg}" onpointerdown="cmVoice.hold(this, event)" onpointerup="cmVoice.release(this)" onpointerleave="cmVoice.release(this)" onpointercancel="cmVoice.release(this)" oncontextmenu="return false" title="Hold to talk">&#x1F3A4;</button><button type="button" class="cm-qbtn cm-call" data-cm-voice="{cfg}" onpointerdown="cmVoice.toggleCall(this)" title="Call mode: talk hands-free; speaking over a reply interrupts it">&#x260E;</button><button type="button" class="cm-qbtn cm-hush" data-cm-sid="{sid}" onpointerdown="cmVoice.hush(this, event)" title="Stop speaking now and mute replies (the reply is still written); tap again to hear replies">&#x1F50A;</button><span class="cm-vad" id="cm-vad-{sid}"></span>"""
 
     def _footer_html(self, sid, extra_footer="", voice_opts=None):
         opts = []
@@ -2246,6 +2274,7 @@ class FileManager:
         path = self.resolve(rel_path)
         if not path.exists(): raise HTTPException(status_code=404, detail="File not found")
         new_path = path.parent / Path(new_name).name
+        if new_path.exists() and new_path != path: raise HTTPException(status_code=409, detail=f"{new_path.name} already exists here")   # a rename never replaces another file
         path.rename(new_path)
         new_rel = str(new_path.relative_to(self.root)).replace("\\", "/")
         self._trigger_change(rel_path, "deleted")
@@ -2257,6 +2286,7 @@ class FileManager:
         if not path.exists(): raise HTTPException(status_code=404, detail="File not found")
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = dest_dir / path.name
+        if dest_path.exists() and dest_path != path: raise HTTPException(status_code=409, detail=f"{path.name} already exists in {dest_dir_rel or 'the root'}")   # a move never replaces another file
         shutil.move(str(path), str(dest_path))
         new_rel = str(dest_path.relative_to(self.root)).replace("\\", "/")
         self._trigger_change(rel_path, "deleted")
@@ -2287,6 +2317,12 @@ class FileManager:
 
     def batch_delete(self, rels: list) -> int: return sum(1 for rel in rels if self.delete(rel)) #Deletes a flat list of files/folders. Returns count actually removed.
 
+    def free_name(self, rel_path: str) -> str:
+        """rel_path, or the first "name-2.ext", "name-3.ext"... that does not exist yet - for copies that must not replace a file already there."""
+        p, n = Path(rel_path), 2
+        while self.resolve(str(p)).exists(): p, n = Path(rel_path).with_name(f"{Path(rel_path).stem}-{n}{Path(rel_path).suffix}"), n + 1
+        return str(p).replace("\\", "/")
+
     def batch_move(self, rels: list, dest_dir_rel: str) -> list:
         """Moves a flat list of files/folders into dest_dir_rel. Returns the new relative paths."""
         out = [self.move(rel, dest_dir_rel) for rel in rels if self.resolve(rel).exists()]
@@ -2304,10 +2340,10 @@ class FileManager:
                 children_html = _walk(child_rel, depth + 1)
                 is_ancestor = selected == child_rel or selected.startswith(child_rel + "/")
                 radio = f"""<input type="radio" name="parent" value="{child_rel}" {"checked" if child_rel == selected else ""} onclick="event.stopPropagation();{onclick_extra}">"""
-                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9}rem;font-size:.78rem;cursor:pointer;list-style:none;">{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
-                else: out += f"""<label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{(depth+1)*0.9}rem;font-size:.78rem;cursor:pointer;">{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
+                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9 + 0.3}rem;font-size:.78rem;cursor:pointer;list-style:none;"><span class="fp-mark"></span>{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
+                else: out += f"""<label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9 + 0.3}rem;font-size:.78rem;cursor:pointer;"><span class="fp-mark"></span>{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
             return out
-        return f"""<div class="folder-picker-root" style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.8rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""} onclick="event.stopPropagation();{onclick_extra}"> &#x1F4C1; (root)</label>{_walk()}</div>"""
+        return f"""<div class="folder-picker-root" style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.8rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""} onclick="event.stopPropagation();{onclick_extra}"> &#x1F4C1; (root)</label><div style="padding-left:.9rem">{_walk()}</div></div>"""
 
     async def save_uploads(self, parent_rel: str, files: list, rel_paths: list[str] = None, on_complete=None) -> list[str]:
         """Writes a batch of UploadFile objects under parent_rel, sanitizing every path segment..."""
@@ -2465,7 +2501,8 @@ function igalCheckedTargets(prefix) {
 function igalMoveConfirm(prefix, dir, lvl) {
     var picked = document.querySelector('#modal-igal-move-'+prefix+' input[name="parent"]:checked');
     var typed = document.getElementById('igal-mv-new-'+prefix);
-    var dest = (typed && typed.value.trim()) || (picked ? picked.value : '');
+    var base = picked ? picked.value : '', sub = typed ? typed.value.trim().replace(/^[/]+|[/]+$/g, '') : '';
+    var dest = sub ? (base ? base + '/' + sub : sub) : base;   /* a typed name is a new folder inside the picked one */
     var targets = igalCheckedTargets(prefix);
     UI_closeModal('igal-move-'+prefix);
     if (!targets.length) return;
@@ -2538,6 +2575,7 @@ class ImageGallery:
                 self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
                 self.IM.scripts[f"{p}_key"] = [self._im_key]
             if self.transfer_targets and not self.select_mode: self.IM.scripts[f"{p}_transfer"] = [self._intent_transfer]
+            if not self.select_mode: self.IM.scripts[f"{p}_lb_action"] = [self._im_lb_action]
 
     def _data_uri(self, rel: str) -> str:
         """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
@@ -2579,10 +2617,13 @@ class ImageGallery:
         prev_btn = f"""<button class="igal-lb-nav prev" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index-1)%len(files))}'>&#x2039;</button>""" if len(files) > 1 else ""
         next_btn = f"""<button class="igal-lb-nav next" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index+1)%len(files))}'>&#x203A;</button>""" if len(files) > 1 else ""
         img_src = self.full_url_fn(full_rel) if self.full_url_fn else self._data_uri(full_rel)
+        def _act(key): return json.dumps({"type": f"{p}_lb_action", "branch": p, "lvl": self.nesting_level, "key": key, "element_scope": f"{rel_dir}|{index}"})
+        copy_btns = "".join(f"""<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_transfer", "branch": p, "lvl": self.nesting_level, "path": full_rel, "dest": k})}' title="Copy this image to {UI.escape(k)} (a free name is used if one is taken)">&#x2934; {UI.escape(k)}</button>""" for k in self.transfer_targets)
+        delete_btn = f"""<button class="cm-qbtn" style="color:#ff4444" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_act("Delete")}' title="Delete this image and show the next (the Delete key does the same)">&#x1F5D1; Delete</button>"""
         return f"""<div class="igal-lightbox" tabindex="-1" data-im-role="{p}_lb" data-im-keys="ArrowLeft ArrowRight Delete Backspace Escape" data-im-scope="{_safe(rel_dir)}|{index}" onclick="if(event.target===this) this.innerHTML=''">
                        <div class="igal-lb-top"><span>{UI.escape(name)} &middot; {index+1}/{len(files)}</span><span style="cursor:pointer" onclick="document.getElementById('igal-lightbox-slot-{p}').innerHTML=''">&#x2715;</span></div>
                        <div class="igal-lb-body">{prev_btn}<img id="igal-lb-img-{p}" src="{img_src}" onwheel="event.preventDefault(); var s=(this.dataset.z||1)*1+(event.deltaY<0?.15:-.15); s=Math.max(1,Math.min(s,4)); this.dataset.z=s; this.style.transform='scale('+s+')'">{next_btn}</div>
-                       <div class="igal-lb-bottom"><button class="cm-qbtn" onclick="document.getElementById('igal-lb-img-{p}').dataset.z=1;document.getElementById('igal-lb-img-{p}').style.transform='scale(1)'">Reset zoom</button></div>
+                       <div class="igal-lb-bottom"><button class="cm-qbtn" onclick="document.getElementById('igal-lb-img-{p}').dataset.z=1;document.getElementById('igal-lb-img-{p}').style.transform='scale(1)'">Reset zoom</button>{copy_btns}{delete_btn}<span id="igal-lb-msg-{p}" style="color:#fff;font-size:.7rem"></span></div>
                    </div>"""
 
     async def _im_lightbox(self, request, payload, imr):
@@ -2649,7 +2690,8 @@ class ImageGallery:
         new_name = (payload.get("name") or "").strip()
         rel_dir = payload.get("dir", "")
         if not rel_path or not new_name: return imr
-        if "." not in new_name: new_name += Path(rel_path).suffix  # rename prompt often omits the extension - keep the original one rather than silently dropping it
+        ext = Path(rel_path).suffix
+        if not self.fm.resolve(rel_path).is_dir() and Path(new_name).suffix.lower() != ext.lower(): new_name += ext   # the gallery never changes a file's type: "cat" and "cat v1.2" both keep .png
         try:
             self.fm.rename(rel_path, new_name)
         except Exception as e:
@@ -2679,15 +2721,18 @@ class ImageGallery:
         return imr
 
     async def _intent_transfer(self, request, payload, imr):
-        rel, dest_key = payload.get("path", ""), payload.get("dest", "")
-        dest_root = self.transfer_targets.get(dest_key)
-        if not dest_root: return imr
-        try:
-            FileManager(Path(dest_root)).write_bytes(Path(rel).name, self.fm.resolve(rel).read_bytes())
-            imr.oob(f'<span style="color:var(--accent);font-size:.7rem">&#x2713; Copied to {_safe(dest_key)}</span>', "igal-action-msg")
-        except Exception as e:
-            imr.oob(f'<span style="color:#ff5f5f;font-size:.7rem">&#x26A0; {_safe(str(e)[:60])}</span>', "igal-action-msg")
-        return imr
+        """Copies one image (path) or the checked ones (delete_targets) into a transfer target's root; a name already taken there gets -2, -3... (nothing is replaced)."""
+        dest_key = payload.get("dest", "")
+        dest_root, rels = self.transfer_targets.get(dest_key), [payload["path"]] if payload.get("path") else _parse_targets(payload.get("delete_targets", []))
+        if not dest_root or not rels: return imr.oob('<span style="color:#ffaa44;font-size:.7rem">Select items first</span>', "igal-action-msg")
+        dest, done = FileManager(Path(dest_root)), []
+        for rel in rels:
+            name = dest.free_name(Path(rel).name)
+            dest.write_bytes(name, self.fm.resolve(rel).read_bytes())
+            done.append(name)
+        msg = f"""<span style="color:var(--accent);font-size:.7rem">&#x2713; Copied {len(done)} to {_safe(dest_key)}{": " + _safe(done[0]) if len(done) == 1 else ""}</span>"""
+        imr.oob(msg, f"igal-lb-msg-{self.intent_prefix}")
+        return imr.oob(msg, "igal-action-msg")
 
     def _crumbs_html(self, rel_dir: str) -> str:
         parts = [p for p in rel_dir.split("/") if p]
@@ -2697,7 +2742,8 @@ class ImageGallery:
         for part in parts:
             acc = f"{acc}/{part}".strip("/")
             crumbs.append(f"""<span style="opacity:.4">/</span><span class="igal-crumb" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": acc})}'>{_safe(part)}</span>""")
-        controls = f"""<div class="igal-controls">
+        copy_sel = f"""<select class="module-select" style="width:auto;margin:0;font-size:.7rem" title="Copy the checked images to..." onchange="if(this.value){{htmx.ajax('POST','/im/in',{{values:{{type:'{p}_transfer', branch:'{p}', lvl:{self.nesting_level}, dest:this.value, delete_targets: JSON.stringify(igalCheckedTargets('{p}'))}}, swap:'none'}}); this.value='';}}"><option value="">Copy checked to...</option>{"".join(f'<option value="{_safe(k)}">{_safe(k)}</option>' for k in self.transfer_targets)}</select>""" if self.transfer_targets and not self.select_mode else ""
+        controls = f"""<div class="igal-controls">{copy_sel}
                            <button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_create_folder", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-prompt="New folder name:" title="New folder">&#x1F4C1;+</button>
                            <button class="cm-qbtn" onclick="htmx.ajax('POST','/im/in',{{values:{{type:'{p}_move_modal', branch:'{p}', lvl:{self.nesting_level}, dir:'{rel_dir}', delete_targets: JSON.stringify(igalCheckedTargets('{p}'))}}, swap:'none'}})" title="Move selected">&#x21C6;</button>
                            <button class="cm-qbtn" style="color:#ff4444" hx-post="/im/in" hx-target="body" hx-swap="none" hx-include="#igal-grid-{p}" hx-vals='{json.dumps({"type": f"{p}_delete", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-confirm="Delete selected items?" title="Delete selected">&#x1F5D1;</button>
@@ -2708,7 +2754,7 @@ class ImageGallery:
         p = self.intent_prefix
         body = f"""<div style="font-size:.75rem;color:var(--text_muted);margin-bottom:.5rem">Move {count} item(s) to:</div>
                    {self.fm.folder_picker_html()}
-                   <input type="text" id="igal-mv-new-{p}" placeholder="or type a new folder name" class="module-select" style="width:100%;font-size:.75rem;margin-top:.4rem">
+                   <input type="text" id="igal-mv-new-{p}" placeholder="new folder inside the picked one (optional)" class="module-select" style="width:100%;font-size:.75rem;margin-top:.4rem">
                    <button type="button" class="ui-btn" style="width:100%;margin-top:.6rem" onclick="igalMoveConfirm('{p}','{_safe(rel_dir)}',{self.nesting_level})">Move</button>"""
         return UI.modal(f"igal-move-{p}", "Move Items", body)
 
@@ -2722,11 +2768,14 @@ class ImageGallery:
         return imr
 
     async def _intent_move(self, request, payload, imr):
+        """Moves the checked items into the picked folder (or a new folder created inside it). Items whose name is taken there stay where they are and are listed."""
         targets = _parse_targets(payload.get("delete_targets", []))
-        dest = (payload.get("name") or "").strip()
-        rel_dir = payload.get("dir", "")
-        self.fm.batch_move(targets, dest)
-        return await self._im_browse(request, {"dir": rel_dir}, imr)
+        dest, rel_dir, kept = (payload.get("name") or "").strip().strip("/"), payload.get("dir", ""), []
+        for rel in targets:
+            try: self.fm.move(rel, dest)
+            except HTTPException as e: kept.append(str(e.detail))
+        await self._im_browse(request, {"dir": rel_dir}, imr)
+        return imr.oob(f"""<span style="color:#ffaa44;font-size:.7rem">Not moved: {_safe("; ".join(kept))}</span>""", "igal-action-msg") if kept else imr
 
     async def _intent_delete(self, request, payload, imr):
         targets = payload.get("delete_targets", [])
@@ -2745,6 +2794,8 @@ class ImageGallery:
             self.fm.batch_delete(targets)
             return await self._im_browse(request, {"dir": rel_dir}, imr)
         return imr
+
+    async def _im_lb_action(self, request, payload, imr): return await self._im_lb_key(request, payload, imr)   # lightbox buttons (phone: no keyboard) send the same keys
 
     async def _im_lb_key(self, request, payload, imr):
         key = payload.get("key", "")
@@ -2825,9 +2876,10 @@ class ShadowStore:
             (backup_dir / f"{ts}{p.suffix}").write_bytes(p.read_bytes()) if read_bytes else (backup_dir / f"{ts}.txt").write_text(p.read_text())
         except Exception: pass
 
+    def _crlf(self, rel_path: str) -> bool: p = self.fm.resolve(rel_path); return p.is_file() and b"\r\n" in p.read_bytes()[:65536]
     def _apply_text(self, entry: dict):
         self._backup(entry["path"], read_bytes=False)
-        self.fm.write(entry["path"], entry["proposed"])
+        self.fm.write(entry["path"], entry["proposed"].replace("\r\n", "\n").replace("\n", "\r\n") if self._crlf(entry["path"]) else entry["proposed"])   # proposals are built from FileManager.read (newlines as \n); a file with Windows line endings keeps them
 
     def _apply_binary(self, rel_path: str):
         self._backup(rel_path, read_bytes=True)
@@ -2933,4 +2985,3 @@ async function pbSaveAs(btn){
     wrap.outerHTML = await r.text();
 }
 """
-

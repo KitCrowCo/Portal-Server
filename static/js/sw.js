@@ -1,4 +1,4 @@
-const CACHE = 'portal-v0.2';
+const CACHE = 'portal-v0.3';   // a new name clears the older caches when this worker activates
 const PRECACHE = ['/', '/static/icon-192.png', '/static/icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -13,15 +13,15 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-    // Network-first for API/HTMX calls, cache-first for static assets
+    // Network first for everything, so an updated server is used as soon as it is reachable (cache-first kept old /static/ files in the app until the cache name changed);
+    // static files are also kept in the cache, so the app still starts when the server cannot be reached.
     const url = new URL(e.request.url);
-    if (url.pathname.startsWith('/static/')) {
+    if (e.request.method === 'GET' && url.pathname.startsWith('/static/')) {
         e.respondWith(
-            caches.match(e.request).then(cached => cached || fetch(e.request).then(res => {
-                const clone = res.clone();
-                caches.open(CACHE).then(c => c.put(e.request, clone));
+            fetch(e.request).then(res => {
+                if (res.ok) { const clone = res.clone(); caches.open(CACHE).then(c => c.put(e.request, clone)); }
                 return res;
-            }))
+            }).catch(() => caches.match(e.request))
         );
     } else {
         // Network first - HTMX/API calls must always be fresh

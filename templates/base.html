@@ -101,6 +101,12 @@
                             <span class='sb-username'>{{ user.username }}</span>
                             <span class='sb-role'>{{ user.role }}</span>
                         </div>
+                        <div class="row" style="padding:0 .8rem .6rem;gap:.3rem" title="Text size for this kind of screen - phones and larger screens are set separately">
+                            <span class="status-label grow">Text size</span>
+                            <button type="button" class="btn-icon" hx-post="/control-panel/ui_scale" hx-vals='js:{step: -1, phone: matchMedia("(max-width: 46rem)").matches}' hx-swap="none">A&#x2212;</button>
+                            <button type="button" class="btn-icon" hx-post="/control-panel/ui_scale" hx-vals='js:{step: 1, phone: matchMedia("(max-width: 46rem)").matches}' hx-swap="none">A+</button>
+                        </div>
+                        <div class="row" style="padding:0 .8rem .6rem"><span id="ui-scale-val" class="status-label">{{ ui_scale_html(active_theme)|safe }}</span><style id="ui-scale-live"></style></div>
                         {% if main_left_toolbar %}{{ main_left_toolbar|safe }}{% endif %}
                         <div style='border-top:0.1rem solid var(--border); padding:1rem 0;'>
                             <a href='/logout' class='nav-link' style='opacity:0.7;'>Logout</a>
@@ -197,6 +203,14 @@
                     updateLayout(bar.closest('[data-shell]'));
                     repositionRecallBtns();
                 }
+
+                /* Narrow screens, where side toolbars slide over the content: one made with phone_closed starts closed (content first), one made with close_on_select closes after a choice in it (a list item or a button) */
+                function closeToolbar(bar) { var b = document.getElementById('btn-' + bar.id); if (b && bar.classList.contains('active')) b.click(); }
+                htmx.onLoad(function (elt) { if (matchMedia('(max-width: 46rem)').matches && elt.querySelectorAll) elt.querySelectorAll('.toolbar.active[data-phone-closed="true"]').forEach(closeToolbar); });
+                document.addEventListener('pointerup', function (e) {
+                    var bar = matchMedia('(max-width: 46rem)').matches && e.target.closest('.toolbar.active[data-close-on-select="true"]');
+                    if (bar && e.target.closest('.side-list-item, .ui-btn, .chip')) setTimeout(function () { closeToolbar(bar); }, 150);
+                });
 
                 function updateLayout(shell) {
                     const targets = shell ? [shell] : document.querySelectorAll('[data-shell]');

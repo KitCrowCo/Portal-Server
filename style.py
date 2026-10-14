@@ -205,7 +205,7 @@ class UI:
         return f"""
             {recall_btn}
             <aside id="{bar_id}" class="toolbar {mode} toolbar-{side} {"active" if start_open else ""}" data-side="{side}" data-size="{size}" data-mode="{mode}"
-                data-nesting="{nesting_level}" data-close-on-select="{str(kwargs.get('close_on_select', False)).lower()}" {im_attrs}
+                data-nesting="{nesting_level}" data-close-on-select="{str(kwargs.get('close_on_select', False)).lower()}" data-phone-closed="{str(kwargs.get('phone_closed', False)).lower()}" {im_attrs}
                 style="{responsive_size} {mode_style} border-{op_side}: var(--border-thick, 0.1rem) solid var(--border); z-index:{Z_BASE + Z_side_stack}; grid-area:{grid_area};">
                 <div class="toolbar-internal">
                     {content}

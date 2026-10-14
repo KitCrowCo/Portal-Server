@@ -15,7 +15,7 @@ from .encrypt import encrypt_token, decrypt_token
 from .auth import create_access_token, verify_password, get_current_user, hash_password
 from .database import engine, Base, get_db, SessionLocal
 from .models import *
-from .control_panel import router as control_router, set_templates as set_cp_templates
+from .control_panel import router as control_router, set_templates as set_cp_templates, ui_scale_html
 from .notify import router as notify_router, send_push, broadcast_push
 from .ws_manager import manager
 from .state import get_state, set_state, clear_state, clear_session, resolve_theme_full
@@ -44,7 +44,7 @@ app.include_router(im_router, prefix = "/im", tags = ["interface-manager"])
 set_ws_manager(manager)
 
 templates = Jinja2Templates(directory = "core_files/templates")
-templates.env.globals.update(os = os, verbose = VERBOSE, UI = UI, STYLE_GROUPS = STYLE_GROUPS)
+templates.env.globals.update(os = os, verbose = VERBOSE, UI = UI, STYLE_GROUPS = STYLE_GROUPS, ui_scale_html = ui_scale_html)
 set_cp_templates(templates)
 
 _REFRESH_THREAD_LOCK = threading.Lock()
@@ -229,7 +229,10 @@ def load_modules(module_type="module"):
                                "encrypt_token":    encrypt_token,
                                "decrypt_token":    decrypt_token,
                                "refresh_system":   create_refresh_callback,
-                               "register_bridge_slot": register_bridge_slot}
+                               "register_bridge_slot": register_bridge_slot,
+                               "register_service": register_service,
+                               "services":         SERVICES,
+                               "register_startup": register_startup}
         if module_type == "tool" and os.path.exists(f"{module_path}/{item}.py"):
             try:
                 module_name = f"tools.{item}.{item}"
@@ -263,6 +266,19 @@ BRIDGE_SLOTS = {}   # name -> fn(user) -> html: controls a tool or module adds t
 
 def register_bridge_slot(name: str, fn): BRIDGE_SLOTS[name] = fn
 templates.env.globals.update(bridge_slots=lambda user: "".join(fn(user) for fn in BRIDGE_SLOTS.values()))
+
+SERVICES = {}   # name -> functions a tool or module offers the others (e.g. "agent": submit_run, run_status); looked up when used, so the order things load in does not matter
+def register_service(name: str, functions: dict): SERVICES[name] = functions
+
+STARTUP_TASKS, _BG_TASKS = [], set()   # background loops tools and modules ask for (init runs before the event loop exists, so they start at server startup); tasks are held so they are not garbage-collected
+def register_startup(fn): STARTUP_TASKS.append(fn)
+
+@app.on_event("startup")
+async def start_registered_tasks():
+    for fn in STARTUP_TASKS:
+        t = asyncio.create_task(fn())
+        _BG_TASKS.add(t)
+        t.add_done_callback(_BG_TASKS.discard)
 
 def get_module_list(module_type="module"):
     modules_path = f"./{module_type}s"
