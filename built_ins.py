@@ -1,4 +1,5 @@
 # built_ins.py
+
 import re, json, uuid, difflib, os, html, shutil, asyncio, time, copy, base64, datetime
 import base64
 import mimetypes
@@ -147,6 +148,8 @@ def _extract_tabsets(lines: list[str]) -> tuple[list[str], list[dict]]:
 MD_BLOCK_CSS = """
 .graphviz-wrapper{background:transparent;max-width:100%;overflow:auto;}
 .graphviz-wrapper svg{max-width:100%;height:auto;display:block;}
+.graphviz-dot-source{display:none;}
+.graphviz-copy-dot{right:2.6rem !important;}
 .graphviz-copy-btn,.graphviz-copy-dot{position:absolute; top:.2rem; right:.2rem; z-index:5; background:var(--bg_panel); border:var(--border-thick) solid var(--border); color:var(--text_muted); border-radius:.3rem; padding:.1rem .3rem; cursor:pointer; font-size:.7rem;}
 .graphviz-copy-btn:hover,.graphviz-copy-dot:hover{color:var(--accent); border-color:var(--accent);}
 .md-details{border:var(--border-thick) solid var(--border);border-radius:var(--radius);margin:.5rem 0;overflow:hidden;}
@@ -302,17 +305,7 @@ MD_LIVE_EDIT_CSS = """
 .cm-live-edit .CodeMirror-scroll { min-height: 100%; }
 """
 
-MD_LATEX_INIT_JS = """
-(function(){
-    function renderAll(root){
-        if (typeof renderMathInElement === 'undefined') return;
-        renderMathInElement(root||document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], ignoredTags:['script','noscript','style','textarea']});
-    }
-    document.addEventListener('htmx:afterSwap', function(e){ renderAll(e.detail.target); });
-    renderAll();
-})();
-"""
-
+# Math: the transpiler marks it (.md-math); static/js/md_math.js, loaded by base.html on every page, typesets it with KaTeX (static/js/katex).
 def _render_list_blocks(text: str, task_interactive: bool, task_counter: list) -> str:
     """Indentation-stack nested list renderer. Handles bullet (-,*,+), numbered (N.), and task ([ ]/[x]) items, nested by RELATIVE indent (not a fixed step size). task_counter is a shared [int] mutated in document-line order so _flip_task's own line-walk stays index-consistent regardless of nesting."""
     lines = text.split("\n")
@@ -362,8 +355,8 @@ def render_graphviz_block(dot_src: str, theme: dict = None) -> str:
 <div style="position:relative;">
 {svg}
 <textarea class="graphviz-dot-source" aria-hidden="true">{escaped_dot}</textarea>
-<button type="button" class="graphviz-copy-btn" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('svg').textContent||this.closest('.graphviz-wrapper').querySelector('svg').innerHTML||'')" title="Copy SVG">&#x2398;</button>
-<button type="button" class="graphviz-copy-dot" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('.graphviz-dot-source').value||'')" title="Copy DOT">&#x2715;</button>
+<button type="button" class="graphviz-copy-btn" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('svg').outerHTML)" title="Copy the picture as SVG">SVG</button>
+<button type="button" class="graphviz-copy-dot" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('.graphviz-dot-source').value)" title="Copy the DOT source">DOT</button>
 </div>
 </div>'''
     except Exception:
@@ -461,16 +454,21 @@ def md_plus_transpiler(text: str, mode: str = "extended", fix_mojibake: bool = T
             label = f'<span style="font-size:.65rem;color:var(--text_muted);padding:.2rem .5rem;">{lang}</span>' if lang else ""
             block = f'<pre class="code-block">{copy_btn}{wrap_btn}{label}<code class="lang-{lang}">{UI.escape(code)}</code></pre>'
         return _stash_block(block)
+    if enable_latex: text = re.sub(r'```(?:math|latex|tex)\n(.*?)```', lambda m: _stash_block(f"""<div class="md-math" data-display="1">{UI.escape(m.group(1).strip())}</div>"""), text, flags=re.S)
     text = re.sub(r'```(\w*)\n(.*?)```', _stash_fenced, text, flags=re.S)
 
     def _stash_inline(m): return _stash_block(f'<code class="inline-code">{UI.escape(m.group(1))}</code>')
     text = re.sub(r'`([^`\n]+)`', _stash_inline, text)
 
     _latex_blocks: list[str] = []
-    def _stash_latex(m): _latex_blocks.append(UI.escape(m.group(0))); return f"\x00LATEX{len(_latex_blocks)-1}\x00"
-    if enable_latex:
-        text = re.sub(r'\$\$.+?\$\$', _stash_latex, text, flags=re.S)
-        text = re.sub(r'(?<!\$)\$[^\$\n]+?\$(?!\$)', _stash_latex, text)
+    def _stash_latex(m, display):
+        _latex_blocks.append(f"""<span class="md-math" data-display="{int(display)}"{' style="display:block"' if display else ""}>{UI.escape(m.group(1).strip())}</span>""")   # a span either way - display math often sits inside a paragraph
+        return f"\x00LATEX{len(_latex_blocks)-1}\x00"
+    if enable_latex:   # $$..$$ and \[..\] display, \(..\) and $..$ inline; a $ followed by a space or a closing $ followed by a digit is money, not math ($5 and $10)
+        text = re.sub(r'\$\$(.+?)\$\$', lambda m: _stash_latex(m, True), text, flags=re.S)
+        text = re.sub(r'\\\[(.+?)\\\]', lambda m: _stash_latex(m, True), text, flags=re.S)
+        text = re.sub(r'\\\((.+?)\\\)', lambda m: _stash_latex(m, False), text, flags=re.S)
+        text = re.sub(r'(?<![\$\w])\$(?=\S)([^\$\n]+?)(?<=\S)\$(?![\$\w])', lambda m: _stash_latex(m, False), text)
 
     _escapes: list[str] = []
     def _stash_escape(m):
@@ -2985,3 +2983,4 @@ async function pbSaveAs(btn){
     wrap.outerHTML = await r.text();
 }
 """
+

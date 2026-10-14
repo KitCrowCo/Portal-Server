@@ -482,9 +482,7 @@ async def dashboard(request: Request, user=Depends(get_current_user)):
                           </div>
                           <div id="portal-nav-bar-outer" style="flex:1; min-height:0; overflow:hidden;">{nav_bar}</div>
                       </div>"""
-    return templates.TemplateResponse(name = "base.html", request = request, context = {"request": request, "user": user, "PWA": True, "content": content_area, "code_mirror": True, **_portal_im.template_context(),
-                        "main_left_toolbar": nav,
-                        "toolbars": {"top": UI.toolbar(side="top", content = top_content, size = "4.5rem", overlay = False, start_open = True, id = "portal-top-bar", nesting_level = 0)}})
+    return templates.TemplateResponse(name = "base.html", request = request, context = {"request": request, "user": user, "PWA": True, "content": content_area, "code_mirror": True, **_portal_im.template_context(),"main_left_toolbar": nav, "toolbars": {"top": UI.toolbar(side="top", content = top_content, size = "4.5rem", overlay = False, start_open = True, id = "portal-top-bar", nesting_level = 0)}})
 
 @app.get("/launcher", response_class = HTMLResponse)
 async def launcher(request: Request):

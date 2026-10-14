@@ -70,6 +70,16 @@
                 <script src="/static/js/codemirror/mode-javascript.js"></script>
             {% endif %}
 
+            <!-- KaTeX CSS -->
+            <link rel="stylesheet" href="js/katex/katex.min.css">
+
+            <!-- KaTeX Auto-render & Core Scripts -->
+            <script defer src="/static/js/katex/katex.min.js"></script>
+            <script defer src="/static/js/katex/contrib/auto-render.min.js"></script>
+
+            <!-- Custom Markdown Math Initializer -->
+            <script defer src="/static/js/md_math.js"></script>
+
             {% if extra_header %}{{ extra_header|safe }}{% endif %}
         </head>
 
