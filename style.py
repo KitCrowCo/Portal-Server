@@ -1,5 +1,6 @@
 # style.py
-import re, io, os, json, pathlib, copy, time, urllib.parse
+import re, io, os, json, pathlib, copy, time, urllib.parse, secrets
+from collections import OrderedDict
 from typing import Dict, Set, Tuple
 from .file_server import FileStructure
 
@@ -340,6 +341,15 @@ class UI:
     _TREE_ICON_FOLDER  = "&#x1F4C1;"
     _TREE_SKIP_DIRS = frozenset({".git", "__pycache__", ".ipynb_checkpoints", ".mypy_cache", ".pytest_cache", "node_modules", ".trash", ".venv", "venv", ".tox", ".ruff_cache"})
     _TREE_SKIP_SUFFIXES = frozenset({".bak", ".pyc", ".pyo"})
+    _TREE_CTX = OrderedDict()   # token -> one drawn file tree's settings (filters included), so a closed folder is filled in when it is opened; the newest 500 trees are kept
+
+    @staticmethod
+    def tree_children(token: str, rel: str, depth: int) -> str:
+        """The rows of one folder of a file tree drawn earlier, when that folder is opened (GET /ui/tree). The tree's own settings, filters and permissions are reused."""
+        ctx = UI._TREE_CTX.get(token)
+        if not ctx: return '<div style="font-size:.7rem;color:var(--text_muted);padding:.2rem .4rem">This list is older than the server - reload the page.</div>'
+        p = (ctx["rel_to"] / rel).resolve()
+        return UI.tree(path=p.as_posix(), depth=depth, _ctx=token) if p.is_relative_to(ctx["rel_to"]) else ""
 
     @staticmethod
     def tree(items=None, path=None, selected=None, active=None, post_url=None, target=None, swap="outerHTML", rel_to=None, depth=0, extra_vals=None, selectable=False, mode="file", options=None, visible_fn=None, label_fn=None, **kwargs) -> str:
@@ -348,15 +358,16 @@ class UI:
         active = active if isinstance(active, (set, frozenset)) else ({active} if active else set())
         if path is None and items is not None and mode == "file": path = items
         if mode == "file" and path is not None:
-            post_url = post_url or options.get("post")
-            target = target or options.get("target")
-            swap = options.get("swap", swap)
-            extra_vals = extra_vals or options.get("extra_vals") or {}
-            selected = selected or set()
             path_obj = pathlib.Path(path).resolve()
             path_str = path_obj.as_posix()
-            rel_to_obj = pathlib.Path(rel_to).resolve() if rel_to else path_obj
-            ctx_url = kwargs.get("context_menu_url", "")
+            token = kwargs.get("_ctx")
+            if not token:   # a new tree: its settings are kept under a token; folders that are not open are drawn closed and filled in from it when opened, so a large folder costs nothing until it is looked at
+                token = secrets.token_urlsafe(9)
+                UI._TREE_CTX[token] = {"post_url": post_url or options.get("post"), "target": target or options.get("target"), "swap": options.get("swap", swap), "extra_vals": extra_vals or options.get("extra_vals") or {}, "selected": selected or set(), "active": active,
+                                       "rel_to": pathlib.Path(rel_to).resolve() if rel_to else path_obj, "selectable": selectable, "visible_fn": visible_fn, "label_fn": label_fn, "ctx_url": kwargs.get("context_menu_url", "")}
+                while len(UI._TREE_CTX) > 500: UI._TREE_CTX.popitem(last=False)
+            c = UI._TREE_CTX[token]
+            post_url, target, swap, extra_vals, selected, active, rel_to_obj, selectable, visible_fn, label_fn, ctx_url = c["post_url"], c["target"], c["swap"], c["extra_vals"], c["selected"], c["active"], c["rel_to"], c["selectable"], c["visible_fn"], c["label_fn"], c["ctx_url"]
             # Check Memory Registry instead of disk
             current_node = FileStructure.get_node(path_str)
             if not current_node:  return f'<div style="font-size:.7rem;color:var(--text_muted);padding:.3rem .4rem">Not found in registry: <code style="font-size:.62rem">{path_str}</code></div>'
@@ -387,7 +398,9 @@ class UI:
                     cb = f"""<input type="checkbox" {"checked" if tot_n and sel_n == tot_n else ""} class="{'tree-cb-partial' if 0 < sel_n < tot_n else ''}" {hx_attrs}>""" if selectable and hx_attrs else ""
                     count = f'<span style="font-size:.6rem;color:var(--text_muted);margin-left:.15rem">({sel_n}/{tot_n}{"~" if 0 < sel_n < tot_n else ""})</span>' if tot_n and selectable else ""
                     folder_open = any(a == rel_str or a.startswith(rel_str + "/") for a in active)
-                    out += f"""<details {"open" if folder_open else ""} class="{"tree-active" if is_active else ""}" style="margin:0;padding-inline-start:0">
+                    lazy = "" if folder_open else f"""hx-get="/ui/tree?ctx={token}&amp;rel={urllib.parse.quote(rel_str)}&amp;depth={depth + 1}" hx-trigger="toggle once" hx-target="find .tree-lazy" hx-swap="outerHTML\""""
+                    children = UI.tree(path=child_abs_str, depth=depth + 1, _ctx=token) if folder_open else f"""<div class="tree-lazy" style="font-size:.65rem;color:var(--text_muted);padding:.1rem .3rem .1rem {(depth + 1) * 0.72:.2f}rem">&#x2026;</div>"""
+                    out += f"""<details {"open" if folder_open else ""} class="{"tree-active" if is_active else ""}" style="margin:0;padding-inline-start:0" {lazy}>
                                    <summary class="tree-fs-row" style="padding:.18rem .3rem .18rem {pl};font-size:.7rem;cursor:pointer;list-style:none;display:flex;align-items:center;gap:.28rem;user-select:none;border-bottom:var(--border-thick) solid var(--border)">
                                        {cb}
                                        <span class="tree-caret" style="opacity:.5;flex-shrink:0;font-size:.5rem;display:inline-block;transition:transform .12s">&#x25B6;</span>
@@ -396,7 +409,7 @@ class UI:
                                        {count}
                                        {ctx_btn}
                                     </summary>
-                                    {UI.tree(path=child_abs_str, selected=selected, active=active, post_url=post_url, target=target, swap=swap, rel_to=rel_to_obj, depth=depth+1, extra_vals=extra_vals, selectable=selectable, mode="file", visible_fn=visible_fn, label_fn=label_fn, context_menu_url=ctx_url)}
+                                    {children}
                                 </details>"""
                 else:
                     icon = UI._TREE_ICONS.get(child_node.get("suffix", ""), UI._TREE_ICON_DEFAULT)

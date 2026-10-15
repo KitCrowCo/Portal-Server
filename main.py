@@ -519,6 +519,12 @@ async def force_rescan():
     wd.initial_baseline_crawl()
     return HTMLResponse("&#x2713;")
 
+@app.get("/ui/tree", response_class=HTMLResponse)
+async def ui_tree(request: Request, ctx: str, rel: str, depth: int = 1):
+    """A closed folder of a file tree (UI.tree), drawn when it is opened."""
+    if not request.state.user: raise HTTPException(status_code=401)
+    return HTMLResponse(UI.tree_children(ctx, rel, depth))
+
 @app.get("/robots.txt", include_in_schema=False)
 async def robots_txt(): return PlainTextResponse("User-agent: *\nDisallow: /\nAllow: /public/\n")
 

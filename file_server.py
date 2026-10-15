@@ -103,21 +103,16 @@ class FileWatchdog:
                 new_registry[abs_file] = {"type": "file", "name": f, "size": size, "suffix": file_path.suffix.lower()}
                 new_registry[abs_dir]["direct_children"].append(abs_file)
 
-        # Calculate directory file counts
-        for path_key, node in list(new_registry.items()):
-            if node["type"] == "folder":
-                prefix = path_key + "/"
-                node["child_files_count"] = sum(1 for k, v in new_registry.items() if v["type"] == "file" and k.startswith(prefix))
+        # Directory file counts: each file adds one to every folder above it (one pass; counting per folder over the whole registry grows with folders x files)
+        for k, v in new_registry.items():
+            if v["type"] == "file": _bump_ancestors(new_registry, k, 1, dirty=False)
 
-        # Atomic update to memory and full DB sync
-        with WORKSPACE_LOCK:
-            WORKSPACE_REGISTRY = new_registry
-            # Clear DB and rebuild
-            with sqlite3.connect(DB_FILE, timeout=15.0) as conn:
-                conn.execute("DELETE FROM registry")
-                data_to_insert = [(p, str(pathlib.Path(p).parent), v['type'], json.dumps(v)) for p, v in new_registry.items()]
-                conn.executemany("INSERT INTO registry (path, parent, type, data) VALUES (?, ?, ?, ?)", data_to_insert)
-                conn.commit()
+        # Atomic swap in memory; the database copy is written after the lock is released, so tree reads are not held up by it
+        with WORKSPACE_LOCK: WORKSPACE_REGISTRY = new_registry
+        with sqlite3.connect(DB_FILE, timeout=15.0) as conn:
+            conn.execute("DELETE FROM registry")
+            conn.executemany("INSERT INTO registry (path, parent, type, data) VALUES (?, ?, ?, ?)", [(p, str(pathlib.Path(p).parent), v['type'], json.dumps(v)) for p, v in new_registry.items()])
+            conn.commit()
 
     def patch_node(self, absolute_path: str, event_type: str):
         """Update memory and queue for database sync. For a genuinely new path, this also links it into its parent's direct_children list - without this, a newly created file exists in the registry as an orphaned node and never appears in any tree render of its parent, since tree rendering walks direct_children rather than scanning the whole registry."""
@@ -129,8 +124,13 @@ class FileWatchdog:
         with WORKSPACE_LOCK:
             if event_type == "deleted":
                 if abs_path in WORKSPACE_REGISTRY:
-                    WORKSPACE_REGISTRY.pop(abs_path)
+                    gone = WORKSPACE_REGISTRY.pop(abs_path)
                     DIRTY_PATHS.add(abs_path)
+                    if gone["type"] == "folder":   # its contents go with it, and leave the counts of the folders above
+                        sub = [k for k in WORKSPACE_REGISTRY if k.startswith(abs_path + "/")]
+                        for k in sub: DIRTY_PATHS.add(k)
+                        _bump_ancestors(WORKSPACE_REGISTRY, abs_path, -sum(1 for k in sub if WORKSPACE_REGISTRY.pop(k)["type"] == "file"))
+                    else: _bump_ancestors(WORKSPACE_REGISTRY, abs_path, -1)
                     parent_node = WORKSPACE_REGISTRY.get(parent_abs)
                     if parent_node and abs_path in parent_node.get("direct_children", []):
                         parent_node["direct_children"].remove(abs_path)
@@ -142,7 +142,7 @@ class FileWatchdog:
                     is_new = abs_path not in WORKSPACE_REGISTRY
                     new_node = {"type": "folder" if is_dir else "file", "name": file_path.name, "size": stat.st_size if not is_dir else 0}
                     if not is_dir: new_node["suffix"] = file_path.suffix.lower()
-                    if is_dir: new_node["direct_children"] = WORKSPACE_REGISTRY.get(abs_path, {}).get("direct_children", [])
+                    if is_dir: new_node.update(direct_children=WORKSPACE_REGISTRY.get(abs_path, {}).get("direct_children", []), child_files_count=WORKSPACE_REGISTRY.get(abs_path, {}).get("child_files_count", 0))
                     WORKSPACE_REGISTRY[abs_path] = new_node
                     DIRTY_PATHS.add(abs_path)
                     if is_new:
@@ -150,11 +150,19 @@ class FileWatchdog:
                         if parent_node is not None:
                             parent_node.setdefault("direct_children", [])
                             if abs_path not in parent_node["direct_children"]: parent_node["direct_children"].append(abs_path)
-                            parent_node["child_files_count"] = sum(1 for k, v in WORKSPACE_REGISTRY.items() if v.get("type") == "file" and k.startswith(parent_abs + "/"))
+                            if not is_dir: _bump_ancestors(WORKSPACE_REGISTRY, abs_path, 1)   # one step per folder above (a full recount per new file made large uploads crawl)
                             DIRTY_PATHS.add(parent_abs)
                 except (FileNotFoundError, PermissionError):
                     return
         self._schedule_db_sync()
+
+def _bump_ancestors(registry: dict, abs_path: str, delta: int, dirty: bool = True):
+    """Adds delta to child_files_count of every registered folder above abs_path (dirty: queue them for the database copy - the crawl writes everything itself)."""
+    p = abs_path.rsplit("/", 1)[0]
+    while p and p in registry:
+        registry[p]["child_files_count"] = registry[p].get("child_files_count", 0) + delta
+        if dirty: DIRTY_PATHS.add(p)
+        p = p.rsplit("/", 1)[0]
 
 # --- External Hooks ---
 
@@ -219,12 +227,9 @@ class FileStructure:
     @staticmethod
     def _normalize_path(user_provided_path: str) -> str:
         """Translates a user-provided path into the absolute key format used in the registry."""
-        # If the path already looks absolute, return it resolved
-        if user_provided_path.startswith("/app"): return pathlib.Path(user_provided_path).resolve().as_posix()
-        # If the path is relative (e.g., 'notes.md' or '_common/notes.md'), force it into the absolute namespace of the Wiki's context.
-        virtual_root = "/app/data/_common"
-        full_path = pathlib.Path(virtual_root) / user_provided_path.lstrip("/")
-        return full_path.resolve().as_posix()
+        # An absolute path is used as it is (resolved, as the crawl stores keys); a relative one ('notes.md', 'Folder/page.md') is taken below the shared area data/_common of APP_ROOT
+        if pathlib.Path(user_provided_path).is_absolute(): return pathlib.Path(user_provided_path).resolve().as_posix()
+        return (pathlib.Path(os.getenv("APP_ROOT", "/app")) / "data" / "_common" / user_provided_path).resolve().as_posix()
 
     @staticmethod
     def get_node(abs_path: str) -> Optional[dict]:

@@ -2883,9 +2883,18 @@ class ShadowStore:
         self._backup(rel_path, read_bytes=True)
         self.fm.write_bytes(rel_path, self._bp(rel_path).read_bytes())
 
-    def accept(self, rel_path: str) -> bool:
+    def stale(self, rel_path: str) -> bool:
+        """The file changed since the change was proposed (someone edited it, or another proposal was accepted): accepting would overwrite that newer work with a version built on the old one."""
         e = self.get(rel_path)
-        if not e or e["status"] != "pending": return False
+        if not e or e.get("kind") == "binary" or "base" not in e: return False
+        try: current = self.fm.read(rel_path)
+        except Exception: current = ""
+        return current.replace("\r\n", "\n") != e["base"].replace("\r\n", "\n")
+
+    def accept(self, rel_path: str, force: bool = False) -> bool:
+        """Applies a pending change. A stale one (stale()) is refused unless force is given - the person has seen that the file changed and accepts anyway."""
+        e = self.get(rel_path)
+        if not e or e["status"] != "pending" or (not force and self.stale(rel_path)): return False
         self._apply_binary(rel_path) if e.get("kind") == "binary" else self._apply_text(e)
         self._sp(rel_path).unlink(missing_ok=True)
         self._bp(rel_path).unlink(missing_ok=True)
@@ -2916,7 +2925,8 @@ def shadow_review_html(shadow, intent_type: str, extra_vals: dict = None, list_i
     rows = ""
     for e in pend:
         rp = e["path"]; did = f"shadow-diff-{abs(hash(rp))%99999}"
-        def _vals(action, rp=rp, did=did): return json.dumps({"type": intent_type, "action": action, "path": rp, "diff_target": did, **(extra_vals or {})})
+        stale = shadow.stale(rp)
+        def _vals(action, rp=rp, did=did): return json.dumps({"type": intent_type, "action": action, "path": rp, "diff_target": did, **({"force": "1"} if stale and action == "accept" else {}), **(extra_vals or {})})
         diff_btn = "" if e.get("kind")=="binary" else f"""<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("diff")}'>Diff</button>"""
         size_note = f'<span style="font-size:.6rem;color:var(--text_muted)">{e.get("size",0)//1024} KB</span>' if e.get("kind")=="binary" else ""
         rows += f"""<div class="glass" style="padding:.5rem .7rem;margin-bottom:.3rem">
@@ -2924,7 +2934,8 @@ def shadow_review_html(shadow, intent_type: str, extra_vals: dict = None, list_i
                 <span style="flex:1;font-family:var(--font-mono);font-size:.78rem">{rp}</span>
                 <span style="font-size:.65rem;color:var(--text_muted)">{e.get("author","")}</span>
                 {diff_btn}{size_note}
-                <button class="cm-qbtn" style="color:var(--accent)" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("accept")}'>Accept</button>
+                {'<span style="font-size:.65rem;color:#ffaa44" title="Accepting replaces the file as it is now with a version built on the older one - check the diff">file changed since proposed</span>' if stale else ""}
+                <button class="cm-qbtn" style="color:var(--accent)" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("accept")}'{' hx-confirm="This file changed after the change was proposed. Accepting replaces the newer file with this version. Accept anyway?"' if stale else ""}>{"Accept anyway" if stale else "Accept"}</button>
                 <button class="cm-qbtn" style="color:#ff5f5f" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("reject")}'>Reject</button>
             </div>
             <div id="{did}" style="font-size:.68rem;font-family:var(--font-mono);white-space:pre-wrap;margin-top:.3rem"></div>
