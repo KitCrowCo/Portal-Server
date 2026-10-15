@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse, File
 from sqlalchemy.orm import Session
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from jose import jwt, JWTError
+from starlette.websockets import WebSocketDisconnect
 
 from .encrypt import encrypt_token, decrypt_token
 from .auth import create_access_token, verify_password, get_current_user, hash_password
@@ -23,12 +24,21 @@ from .style import *
 from .interface_manager import router as im_router, set_ws_manager, InterfaceManager, IMResponse, push_fragment, push_to_client, route_ws_intent
 from .file_server import *
 from . import built_ins as bf
-from starlette.websockets import WebSocketDisconnect
 
 # -- DB init --
 Base.metadata.create_all(bind=engine)
 
 # -- Routers and Templates --
+
+class RevalidatedStatic(StaticFiles):
+    """
+    Static files whose code and styles the browser checks with the server on each use (Cache-Control: no-cache - an unchanged file answers 304, nothing is re-sent).
+    Without it a browser may keep using an older .js/.css for hours after an update.
+    """
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        r = super().file_response(full_path, stat_result, scope, status_code)
+        if str(full_path).endswith((".js", ".mjs", ".css", ".json", ".html", ".md")): r.headers["Cache-Control"] = "no-cache"
+        return r
 
 base_theme = DEFAULT_THEMES["dark"] # Theme used for the very basic including possibly public pages and logins
 VERBOSE = os.getenv("VERBOSE", False)
@@ -37,7 +47,7 @@ ROOT_DIR = os.getenv("ROOT_DIR", "/app")
 
 app = FastAPI(title = SERVER_NAME)
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts = ["*"])
-app.mount("/static", StaticFiles(directory = "core_files/static"), name = "static")
+app.mount("/static", RevalidatedStatic(directory="core_files/static"), name="static") # Core static files mount
 app.include_router(control_router, prefix = "/control-panel")
 app.include_router(notify_router)
 app.include_router(im_router, prefix = "/im", tags = ["interface-manager"])
@@ -149,14 +159,11 @@ def load_server_router(path, item, prefix, dependencies={}, router_type="module"
         if router_type == "tool" and not path_modifier:
             mod = Tools[item]
         else:
-            # Use an explicit package hierarchy name (e.g., modules.my_module.my_module)
-            module_name = f"{router_type}s.{item}.{path_modifier}{dash}{item}".strip('.')
+            module_name = f"{router_type}s.{item}.{path_modifier}{dash}{item}".strip('.') # Use an explicit package hierarchy name (e.g., modules.my_module.my_module)
             spec = importlib.util.spec_from_file_location(module_name, main_path)
             mod = importlib.util.module_from_spec(spec)
-            # Define the package so relative imports work inside the tool natively
-            mod.__package__ = f"{router_type}s.{item}"
-            # Register in sys.modules BEFORE execution to prevent dual instantiation
-            sys.modules[module_name] = mod
+            mod.__package__ = f"{router_type}s.{item}" # Define the package so relative imports work inside the tool natively
+            sys.modules[module_name] = mod # Register in sys.modules BEFORE execution to prevent dual instantiation
             spec.loader.exec_module(mod)
         has_router = hasattr(mod, "router")
         module_meta = {"label": item.replace("_", " ").title(), "icon": "", "description": "-", "persistence": "public", "public": False}
@@ -170,8 +177,7 @@ def load_server_router(path, item, prefix, dependencies={}, router_type="module"
         if path_modifier != "public": metas[router_type].update({item: module_meta})
         refresh_cb = dependencies.get("refresh_system") if dependencies else None
         deps_with_meta = {**dependencies, "meta": module_meta}
-        if refresh_cb and has_router:
-            deps_with_meta["refresh_system"] = refresh_cb(f"/{effective_prefix}/{item}", mod.router)
+        if refresh_cb and has_router: deps_with_meta["refresh_system"] = refresh_cb(f"/{effective_prefix}/{item}", mod.router)
         if dependencies and hasattr(mod, "init_module"):
             mod.init_module(deps_with_meta)
             if verbose: print(f"Environment injected into module: {item}")
@@ -202,11 +208,9 @@ def load_modules(module_type="module"):
     for item in os.listdir(modules_dir):
         module_path = os.path.join(modules_dir, item)
         if not os.path.isdir(module_path) or not validate_module_name(item): continue
-        # GUARANTEE ITEM __init__.py EXISTS (e.g., tools/my_tool/__init__.py) This makes the specific tool/module a valid sub-package.
-        item_init_path = os.path.join(module_path, "__init__.py")
+        item_init_path = os.path.join(module_path, "__init__.py") # GUARANTEE ITEM __init__.py EXISTS (e.g., tools/my_tool/__init__.py) This makes the specific tool/module a valid sub-package.
         if not os.path.exists(item_init_path):
             with open(item_init_path, "w") as f: pass
-
         check_module_dependencies(module_path)
         router_dependencies = {"auth":             get_current_user,
                                "db":               get_db,
@@ -249,7 +253,7 @@ def load_modules(module_type="module"):
         admin_router = load_server_router(module_path, item, prefix=module_type, dependencies=router_dependencies, router_type=module_type, path_modifier="", verbose=VERBOSE)
         if admin_router:
             os.makedirs(f"./data/{item}/static", exist_ok=True)
-            app.mount(f"/{module_type}/assets/{item}", StaticFiles(directory=f"./data/{item}/static"), name=f"{module_type}_assets_{item}")
+            app.mount(f"/{module_type}/assets/{item}", RevalidatedStatic(directory=f"./data/{item}/static"), name=f"{module_type}_assets_{item}")
             if os.path.exists(f"{module_path}/public_{item}.py"):
                 if VERBOSE: print(f"Mounting Public Router: {item}")
                 public_deps = {"templates": templates, "theme": active_theme.config if active_theme else {}, "tools": Tools, "resolve_theme": resolve_theme_full, "get_state": get_state}
@@ -311,9 +315,7 @@ load_modules("tool")
 # -- Auth Routes --
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    next_url = request.query_params.get("next", "")
-    return templates.TemplateResponse(name = "login.html", request = request, context = {"request": request, "user": None, "theme": base_theme, "next": next_url})
+async def login_page(request: Request): return templates.TemplateResponse(name = "login.html", request = request, context = {"request": request, "user": None, "theme": base_theme, "next": request.query_params.get("next", "")})
 
 @app.post("/login")
 async def handle_login(response: Response, request: Request, username: str = Form(...), password: str = Form(...), next: str = Form(default="/"), db=Depends(get_db)):
@@ -336,8 +338,7 @@ async def logout(request: Request, response: Response):
 # -- Core Routes --
 
 def sync_module_docs():
-    """Copies each module's static/README.md (if present) into the _common shared root under Modules/{name}.md, so any module can ship user-facing docs that appear in-wiki automatically.
-    Same overwrite-only-if-changed behavior as sync_information_docs()."""
+    """Copies each module's static/README.md (if present) into the _common shared root under Modules/{name}.md, so any module can ship user-facing docs that appear in-wiki automatically. Same overwrite-only-if-changed behavior as sync_information_docs()."""
     dest_dir = pathlib.Path("./data/_common/Modules")
     for item in get_module_list():
         src = pathlib.Path(f"./modules/{item}/static/README.md")
@@ -363,20 +364,18 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 async def external_frame(url: str, request: Request, user=Depends(get_current_user)):
     safe_url = url if url.startswith(("http://","https://")) else f"http://{url}"
     return HTMLResponse(f"""<div style="height:100%;display:flex;flex-direction:column">
-        <div style="padding:.2rem .5rem;font-size:.7rem;color:var(--text_muted);border-bottom:var(--border-thick) solid var(--border);display:flex;justify-content:space-between">
-            <span>{safe_url}</span><a href="{safe_url}" target="_blank" style="color:var(--accent)">Open in new tab &#x2192;</a>
-        </div>
-        <iframe src="{safe_url}" style="flex:1;width:100%;border:none;display:block;" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"></iframe>
-    </div>""")
+                                <div style="padding:.2rem .5rem;font-size:.7rem;color:var(--text_muted);border-bottom:var(--border-thick) solid var(--border);display:flex;justify-content:space-between">
+                                    <span>{safe_url}</span><a href="{safe_url}" target="_blank" style="color:var(--accent)">Open in new tab &#x2192;</a>
+                                </div>
+                                <iframe src="{safe_url}" style="flex:1;width:100%;border:none;display:block;" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-downloads"></iframe>
+                            </div>""")
 
 # -- WebSocket --
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)):
-    try:
-        await websocket.accept()
-    except Exception as e:
-        print(f"[WS] accept error: {e}")
+    try: await websocket.accept()
+    except Exception as e: print(f"[WS] accept error: {e}")
     user_id = "anonymous"
     try:
         token = websocket.cookies.get("access_token") or websocket.query_params.get("token", "")
@@ -451,7 +450,6 @@ async def _handle_cfg_state(request, payload, imr):
 _portal_im.scripts["portal_init"] = [_h_portal_init]
 _shell_im.scripts["set_bridge"] = [_handle_bridge_state]
 _shell_im.scripts["set_cfg"] = [_handle_cfg_state]
-
 
 @app.get("/")
 async def dashboard(request: Request, user=Depends(get_current_user)):
