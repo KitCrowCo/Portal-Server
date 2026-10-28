@@ -1,0 +1,649 @@
+# style.py
+import re, io, os, json, pathlib, copy, time, urllib.parse, secrets
+from collections import OrderedDict
+from typing import Dict, Set, Tuple
+from .file_server import FileStructure
+
+# --- Modular UI Settings & Localization ---
+UI_STRINGS = {
+    "err_auth": "Authentication required.",
+    "err_generic": "System error occurred.",
+    "label_modules": "Modules",
+    "btn_logout": "Logout",
+    "login_fail": "Invalid password provided.",
+    "rate_limit": "Rate limited. Please wait.",
+    "auth_required": "Authentication required to access this module.",
+    "system_error": "A system error occurred. Please contact the administrator."
+}
+
+DEFAULT_THEMES = {
+    "dark": {
+        "name": "Obsidian Sapphire",
+        "bg": "rgba(2, 4, 8, 1.00)",
+        "bg_panel": "rgba(83, 83, 83, 0.3)",
+        "surface": "#0a0c12",
+        "glass": "rgba(10, 12, 18, 0.3)",
+        "glass_box_shadow": "0 0.5rem 1rem rgba(0, 0, 0, 0.3)",
+        "accent": "#00d4ff",
+        "accent_glow": "rgba(0, 212, 255, 0.25)",
+        "accent_dim": "rgba(0, 212, 255, 0.1)",
+        "border": "rgba(255, 255, 255, 0.08)",
+        "text": "#ced4da",
+        "text_muted": "#6c757d",
+        "font_family": "Inter, system-ui", 
+        "font_size": "1.4rem",
+        "radius": "1rem",
+        "blur": "0.75rem",
+        "icon_size": "1.2rem",
+        "recall_button_size": "1.5rem",
+        "recall_button_pos": "1rem",
+        "btn_size": "2.2rem",
+        "bg_image": "",
+    },
+    "light": {
+        "name": "Japanese Zen",
+        "bg": "#fcfaf2",                         # Shogi Paper white
+        "bg_panel": "rgba(255, 255, 255, 0.6)",  # Translucent paper effect
+        "surface": "#e8e4d8",
+        "glass": "rgba(255, 255, 255, 0.6)",     # Translucent paper effect
+        "glass_box_shadow": "0 0.2rem 0.5rem rgba(0, 0, 0, 0.05)",
+        "accent": "#1a1a1a",                     # Black Ink
+        "accent_glow": "rgba(26, 26, 26, 0.1)",
+        "accent_dim": "rgba(45, 65, 45, 0.15)",  # Hint of Dark Greenery
+        "border": "rgba(0, 0, 0, 0.1)",
+        "text": "#2d2d2d",
+        "text_muted": "#66635a",
+        "font_family": "Bitter",                 # Preference for classic ink feel
+        "radius": "0.2rem",                      # Sharper, like shogi frames
+        "blur": "0.4rem",
+        "icon_size": "1.2rem",
+        "recall_button_size": "1.5rem",
+        "recall_button_pos": "1rem",
+        "btn_size": "2.2rem",
+        "bg_image": "none",
+        "font_size": "1.2rem", # This can be bound to a settings slider later
+    }
+}
+
+# --- Theme field labels: friendly names (and short hints) for the theme editor, so a non-technical user edits "Accent colour", not "accent". Unknown keys fall back to the raw name. ---
+THEME_LABELS = {
+    "name": ("Theme name", ""),
+    "accent": ("Accent colour", "highlights, links, active items"),
+    "accent_glow": ("Accent glow", "soft halo around accents"),
+    "accent_dim": ("Accent background", "faint accent fill behind buttons"),
+    "bg": ("Page background", ""),
+    "bg_panel": ("Panel background", "toolbars and side panels"),
+    "surface": ("Surface", "cards and editors"),
+    "glass": ("Glass panels", "translucent overlays"),
+    "border": ("Border colour", ""),
+    "text": ("Text colour", ""),
+    "text_muted": ("Muted text", "hints and secondary labels"),
+    "font_family": ("Font", ""),
+    "font_size": ("Base text size", "the whole UI scales from this"),
+    "radius": ("Corner rounding", "0 = square, larger = rounder"),
+    "blur": ("Panel blur", "frosted-glass strength"),
+    "icon_size": ("Icon size", ""),
+    "btn_size": ("Button size", "...bigger, easier tap targets"),
+    "recall_button_size": ("Expand button size", "the round arrow that re-opens a closed toolbar - raise it to make it easier to hit"),
+    "recall_button_pos": ("Expand button spacing", "gap from the screen edge"),
+    "bg_image": ("Background image", "URL, or blank for none"),
+    "glass_box_shadow": ("Panel shadow", ""),
+}
+# The handful most people actually change, pinned to the top of the editor in this order; everything else follows alphabetically.
+THEME_COMMON = ["name", "accent", "bg", "bg_panel", "text", "text_muted", "font_size", "radius", "recall_button_size", "icon_size", "btn_size"]
+
+def _color_hex(v) -> str:
+    """A #rrggbb for a native colour picker from #hex, rgb() or rgba(); #000000 when it is not a colour."""
+    v = str(v).strip()
+    if v.startswith("#"): return (v + "000000")[:7]
+    mm = re.match(r"rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)", v)
+    return ("#%02x%02x%02x" % tuple(int(x) for x in mm.groups())) if mm else "#000000"
+def _is_color(v) -> bool: return str(v).strip().startswith(("#", "rgb"))
+
+def theme_label(key: str) -> tuple: return THEME_LABELS.get(key, (key.replace("_", " ").capitalize(), ""))
+def theme_field_order(d: dict) -> list:
+    """Keys of a theme dict with the common ones first (in THEME_COMMON order), the rest alphabetical - for a friendlier editor without changing what is stored."""
+    rest = sorted(k for k in d if k not in THEME_COMMON)
+    return [k for k in THEME_COMMON if k in d] + rest
+
+STYLE_GROUPS = {"ui-btn-default": "background: var(--accent_dim); color: var(--accent); border: var(--border-thick) solid var(--accent); padding: 0.6rem 1.2rem; border-radius: var(--radius); cursor: pointer; font-weight: 600; ",
+                "ui-btn-danger": "background: rgba(255,0,0,0.1); color: /#ff5f5f; border: var(--border-thick) solid /#ff5f5f;"}
+
+def resolve_path(rel_path: str, root = pathlib.Path(os.getenv("ROOT_DIR", os.getcwd())).resolve()) -> pathlib.Path:
+    """Resolve relative path to an absolute path inside ROOT_DIR. Reject path traversal attempts."""
+    # If empty, treat as root
+    if rel_path in (None, "", "."): return root
+    p = (root / rel_path).resolve()
+    try: p.relative_to(root)
+    except Exception: raise HTTPException(status_code=400, detail="Invalid path (outside allowed root)")
+    return p
+
+class UI:
+    """The Object-Oriented Visual Engine"""
+
+    # --- HTMX attr & Other Helper ---
+
+    _toolbar_side_ctr: dict = {}  # per-request toolbar recall button position counter
+    @classmethod
+    def reset_toolbar_layout(cls): cls._toolbar_side_ctr = {}
+
+    @staticmethod
+    def htmx_html(htmx_dict = {}): return " ".join([f"hx-{k}='{v}'" for k,v in htmx_dict.items()]) if htmx_dict != {} else ""
+
+    @staticmethod
+    def escape(s: str) -> str: return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;").replace("'", "&#39;")
+
+    def human_size(path):
+        try: n = os.path.getsize(path)
+        except Exception: return ""
+        for unit in ['B','KB','MB','GB']:
+            if n < 1024: return f"{n:.0f}{unit}"
+            n /= 1024
+        return f"{n:.0f}TB"
+
+    # --- Buttons ---
+
+    @staticmethod
+    def icon_button(icon, cmd = "", **kwargs): return f"""<button class="btn-icon" {f'id={kwargs.get("id")} ' if kwargs.get("id") else ""}onclick="{cmd}" {UI.htmx_html(kwargs.get("htmx", {}))} style="{kwargs.get('style', "width:var(--btn_size,2.2rem); height:var(--btn_size,2.2rem)")}" title="{kwargs.get("hint", "")}">{icon}</button>"""
+
+    # **************Needs update to broader scoped and htmx/intent oriented************************************************************
+    @staticmethod
+    def button(label: str, url: str = None, target: str = "", variant: str = "primary", cmd: str = None, **kwargs):
+        """Standardized Button Component. Omit target to route via /im/intent."""
+        classes = f"ui-btn ui-btn-{kwargs.get('size', 'md')} ui-btn-{kwargs.get('variant', 'default')}"
+        if url and target:
+            attr = f'hx-get="{url}" hx-target="{target}"'
+        elif url:
+            attr = f'hx-post="/im/intent" hx-vals=\'{{"type":"navigate","url":"{url}"}}\' hx-swap="none"'
+        else:
+            attr = f'onclick="{cmd}"'
+        return f"""<button class="{classes}" {attr}{UI.htmx_html(kwargs.get("htmx", {}))} style="width:{kwargs.get("w", "auto")};">{label}</button>"""
+
+    # --- Tool Bars ---
+
+    @staticmethod
+    def toolbar(side = "left", content = "", size = "18rem", overlay = False, **kwargs):
+        if side not in ["top", "bottom", "left", "right"]: side = "left"
+        bar_id = kwargs.get("id", f"{side}-bar")
+        start_open = kwargs.get('start_open', False)
+        max_size = 100
+        offset = kwargs.get('btn_offset', "0.2rem")
+        UI._toolbar_side_ctr[side] = UI._toolbar_side_ctr.get(side, 0) + 1
+        bar_index = int(kwargs.get('bar_index', UI._toolbar_side_ctr[side] - 1))
+        idx_off = 1.5
+        side_size = {"left": "width", "right": "width", "top": "height", "bottom": "height"}
+        ortho_side = {"left": "top", "right": "bottom", "top": "right", "bottom": "left"}[side]
+        mode = "overlay" if overlay else "shrink"
+        mode_style = kwargs.get("style", f"""position:absolute; {side}:0; {ortho_side}:0; {side_size[ortho_side]}:100%;""" if overlay else "")
+        nesting_level = int(kwargs.get('nesting_level', 1))
+        Z_BASE = max(0, 1000 - (nesting_level * 10))
+        Z_side_stack = {"top": 7, "bottom":6, "left":5, "right": 4}[side]
+        #btn_pos = kwargs.get("btn_pos", f"position:absolute; {side}: {offset + size if start_open else 0}; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:{Z_BASE + Z_side_stack + 1};")
+        op_side = {"top": "bottom", "bottom":"top", "left":"right", "right":"left"}[side]
+        arrows = {"left": "&#x25C0;", "right": "&#x25B6;", "top": "&#x25B2;", "bottom": "&#x25BC;"}
+        responsive_size = (f"{side_size[side]}: min({size}, {max_size}%);" if overlay else f"""height: 100%;{" width: 100%" if side in ["left", "right"] else ""}""")
+        toggle_cmd = f'''onclick="toggleToolbar('{bar_id}', '{side}', '{size}', '{mode}', '{arrows[side]}', '{arrows[op_side]}')"'''
+        btn_pos = kwargs.get("btn_pos", f"position:absolute; {side}:0; {ortho_side}: calc({offset} + {bar_index*idx_off}rem); z-index:{Z_BASE + Z_side_stack + 3};")
+        recall_btn = "" if kwargs.get('locked', False) else f"""<button id="btn-{bar_id}" class="btn-icon toolbar-recall-btn" style="font_size:var(--recall_button_size); {btn_pos}" {toggle_cmd}>{arrows[side] if start_open else arrows[op_side]}</button>"""
+        inline_close = "" if (kwargs.get('locked', False) or not overlay or kwargs.get('inline_close', True) is False) else f"""<button type="button" class="btn-icon toolbar-inline-close" style="position:absolute; {"bottom" if side!="top" else "top"}:0.4rem; {"right" if side!="right" else "left"}:0.4rem; z-index:{Z_BASE + Z_side_stack + 2};" {toggle_cmd} title="Collapse">&#x2715;</button>"""
+        if kwargs.get('resizable', False):
+            if side in ["left", "right"]:
+                delta_expr  = "ev.clientX - startX" if side == "left" else "startX - ev.clientX"
+                td_expr = "t.clientX - startX" if side == "left" else "startX - t.clientX"
+            else:
+                delta_expr = "ev.clientY - startY" if side == "top" else "startY - ev.clientY"
+                td_expr = "t.clientY - startY" if side == "top" else "startY - t.clientY"
+            coord_start = "var startX=e.clientX, startY=e.clientY;" if side in ["left","right"] else "var startX=0, startY=e.clientY;"
+            td_coord = "var startX=t.clientX, startY=0;" if side in ["left","right"] else "var startX=0, startY=t.clientY;"
+            resize_handle = f"""
+                <div style="position:absolute; {op_side}:0; width:0.6rem; height:100%; cursor:ew-resize; z-index:{Z_BASE + Z_side_stack}; background:transparent;"
+                     onmousedown="(function(e){{
+                         e.preventDefault();
+                         var bar=document.getElementById('{bar_id}');
+                         var btn=document.getElementById('btn-{bar_id}');
+                         var shell=bar.closest('[data-shell]');
+                         var startSize=bar.getBoundingClientRect().{side_size[side]};
+                         {coord_start}
+                         function onMove(ev){{
+                             var delta={delta_expr};
+                             var newSize=Math.max(80, Math.min(startSize+delta, window.innerWidth*{max_size}/100));
+                             bar.style.{side_size[side]}=newSize+'px';
+                             bar.dataset.size=newSize+'px';
+                             shell && shell.style.setProperty('--{side}-size', newSize+'px');
+                             if(btn) btn.style['{side}']=(newSize+8)+'px';
+                         }}
+                         function onUp(){{ document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp); }}
+                         document.addEventListener('mousemove',onMove);
+                         document.addEventListener('mouseup',onUp);
+                     }})(event)"
+                     ontouchstart="(function(e){{
+                         var t=e.touches[0];
+                         var bar=document.getElementById('{bar_id}');
+                         var btn=document.getElementById('btn-{bar_id}');
+                         var shell=bar.closest('[data-shell]');
+                         var startSize=bar.getBoundingClientRect().{side_size[side]};
+                         {td_coord}
+                         function onMove(ev){{
+                             ev.preventDefault();
+                             var tc=ev.touches[0];
+                             var delta={td_expr};
+                             var newSize=Math.max(80, Math.min(startSize+delta, window.innerWidth*{max_size}/100));
+                             bar.style.{side_size[side]}=newSize+'px';
+                             bar.dataset.size=newSize+'px';
+                             shell && shell.style.setProperty('--{side}-size', newSize +'px');
+                             if(btn) btn.style['{side}']=(newSize+1)+'px';
+                         }}
+                         function onEnd(){{ document.removeEventListener('touchmove',onMove); document.removeEventListener('touchend',onEnd); }}
+                         document.addEventListener('touchmove',onMove,{{passive:false}});
+                         document.addEventListener('touchend',onEnd);
+                         e.preventDefault();
+                     }})(event)">
+                    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); {side_size[side]}:0.5rem; {side_size[ortho_side]}:2rem; background:var(--border); border-radius:0.2rem; pointer-events:none;"></div>
+                </div>"""
+        else:
+            resize_handle = ""
+        im_scope = kwargs.get("im_scope", ""); im_role = kwargs.get("im_role", "")
+        im_attrs = f'data-im-scope="{im_scope}" data-im-role="{im_role}"' if im_scope or im_role else ""
+        grid_area = "1 / 1 / -1 / -1" if overlay else side
+
+        return f"""
+            {recall_btn}
+            <aside id="{bar_id}" class="toolbar {mode} toolbar-{side} {"active" if start_open else ""}" data-side="{side}" data-size="{size}" data-mode="{mode}"
+                data-nesting="{nesting_level}" data-close-on-select="{str(kwargs.get('close_on_select', False)).lower()}" data-phone-closed="{str(kwargs.get('phone_closed', False)).lower()}" {im_attrs}
+                style="{responsive_size} {mode_style} border-{op_side}: var(--border-thick, 0.1rem) solid var(--border); z-index:{Z_BASE + Z_side_stack}; grid-area:{grid_area};">
+                <div class="toolbar-internal">
+                    {content}
+                </div>
+                {resize_handle}
+            </aside>
+            """
+
+    # --- Tab Bar & Tabs ---
+
+    @staticmethod
+    def tab(label, tab_id = None, active = False, icon = "", **kwargs):
+        id_attr = f'id="tab-{tab_id.replace("/","_").replace(".","_")}"' if tab_id else ""
+        title_attr = f'title="{UI.escape(kwargs["tooltip"])}"' if kwargs.get("tooltip") else ""
+        data_attrs = " ".join(f'data-{k[5:]}="{v}"' for k, v in kwargs.items() if k.startswith("data_") and v)
+        close_click = UI.htmx_html(kwargs["on_close"]) if kwargs.get("on_close") else kwargs.get("close_attrs", None)
+        close = f"""<span class="close-btn" onclick="event.stopPropagation()" {close_click}>&#x2715;</span>""" if close_click else ""
+        back_click = UI.htmx_html(kwargs["back_attrs"]) if kwargs.get("back_attrs") else ""
+        back_btn = f"""<span class="tab-back-btn" onclick="event.stopPropagation()" {back_click} title="Back">&#x2190;</span>""" if back_click else ""
+        draggable = ' draggable="true" ondragstart="tabDragStart(event)" ondragover="event.preventDefault()" ondrop="tabDrop(event)"' if tab_id else ""
+        return f"""<div {id_attr} class="{"tab active" if active else "tab"}" data-tab-id="{tab_id or ""}" {data_attrs} {UI.htmx_html(kwargs.get("htmx")) if "htmx" in kwargs.keys() else kwargs.get("focus_attrs", "")} {title_attr}{draggable} style="cursor:pointer;">{icon if icon else ""}{back_btn}{label}{close}</div>"""
+
+    @staticmethod
+    def tab_bar(content="", id="tab-bar", **kwargs):
+        """Generic tab bar container. id sits on the OUTER wrapper (strip + add-button) so an outerHTML OOB swap replaces the whole unit atomically."""
+        add_btn_html = f"""<div class="tab" title="New tab" style="opacity: 0.6; flex: 0 0 auto; border-left: var(--border-thick) solid var(--border);" {UI.htmx_html(kwargs.get("add_btn", {}))}>+</div>""" if kwargs.get("add_btn") else ""
+        back_btn_html = f"""<div class="tab" title="Back" style="opacity: 0.6; flex: 0 0 auto; border-right: var(--border-thick) solid var(--border);" {UI.htmx_html(kwargs.get("back_btn", {}))}>&#x2190;</div>""" if kwargs.get("back_btn") else ""
+        return f"""<div id="{id}" class="tabs-container" data-nesting="{kwargs.get("nesting_level", 1)}" style="display: flex; width: 100%; border-bottom: var(--border-thick) solid var(--border); background: var(--bg_panel);">
+                        {back_btn_html}
+                        <div class="tab-bar" style="{kwargs.get("style", "display:flex; flex:1; overflow-x:auto; scrollbar-width:none; align-items:stretch;")}"{UI.htmx_html(kwargs.get("htmx", {}))}>{content}</div>
+                        {add_btn_html}
+                    </div>"""
+
+    # --- Containers ----
+
+    @staticmethod
+    def card(title: str = "", content: str = "", **kwargs):
+        """Standardized Glass Container"""
+        htmx = UI.htmx_html(kwargs.get("htmx", {}))
+        return f"""<div class="glass card" style="cursor:pointer; text-align:center; transition:border 0.2s; padding: 1.5rem; margin-bottom: 1rem; border: var(--border-thick) solid var(--border);" {htmx}>
+                       <h4 style="margin-top: 0; color: var(--text_muted); font-weight:600; font-size: 0.8rem; text-transform: uppercase;">{title}</h4>
+                       <div>{content}</div>
+                   </div>"""
+
+    @staticmethod
+    def modal(modal_id: str, title: str, content: str, **kwargs) -> str:
+        """
+        Generic centered modal: backdrop + glass panel + title + X close.
+        Caller supplies its own form/buttons inside `content`. Closes via the global UI_closeModal(modal_id) JS function (defined once in base.html) - call it from a submit handler, a button, or the backdrop click.
+        kwargs: width, max_width (CSS sizes, e.g. "30rem").
+        """
+        width, max_width = kwargs.get("width", "90%"), kwargs.get("max_width", "30rem")
+        style = f"""<style>
+                        #backdrop-{modal_id} {{ position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 9999; backdrop-filter: blur(calc(var(--blur) / 2)); }}
+                        #modal-{modal_id} {{ width: {width}; max-width: {max_width}; max-height: 90vh; overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; position:relative; box-sizing: border-box; }}
+                        .modal-header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: var(--board-thick) solid var(--border); padding-bottom: 0.5rem; }}
+                        .modal-header h3 {{ margin: 0; font-size: 1.1rem; }}
+                    </style>"""
+        return f"""{style}
+        <div id="backdrop-{modal_id}" onclick="if(event.target===this) UI_closeModal('{modal_id}')">
+            <div id="modal-{modal_id}" class="glass">
+                <div class="modal-header"><h3>{UI.escape(title)}</h3><button type="button" class="close-btn" onclick="UI_closeModal('{modal_id}')">&#x2715;</button></div>
+                <div style="padding-top: 0.5rem;">{content}</div>
+            </div>
+        </div>"""
+
+    # --- Misc ---
+
+    @staticmethod
+    def hex_to_rgba(hex_str, alpha=0.1):
+        """Converts #RRGGBB to rgba(r, g, b, a)"""
+        hex_str = hex_str.lstrip('#')
+        r, g, b = tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+        return f"rgba({r}, {g}, {b}, {alpha})"
+
+    # --- Generalized Field Components ---
+
+    @staticmethod
+    def field(label, input_html, hint="", **kwargs):
+        """Label + input + optional hint, in one consistent layout. row=True for inline checkbox-style fields."""
+        hint_html = f'<div style="font-size:.65rem;color:var(--text_muted);margin-top:.15rem">{hint}</div>' if hint else ""
+        if kwargs.get("row"): return f'<label style="display:flex;align-items:center;gap:.5rem;font-size:.78rem;margin-bottom:.6rem">{input_html} {UI.escape(label)}{hint_html}</label>'
+        return f'<label style="display:block;margin-bottom:.6rem"><div style="font-size:.75rem;color:var(--text_muted);margin-bottom:.2rem">{UI.escape(label)}</div>{input_html}{hint_html}</label>'
+
+    @staticmethod
+    def input(name, type_="text", value="", placeholder="", **kwargs):
+        """One renderer for every text-like input (text/number/password/color/date/...) - type_ picks the HTML type."""
+        extra = " ".join(f'{k.replace("_","-")}="{v}"' for k,v in kwargs.get("attrs", {}).items())
+        return f'<input type="{type_}" name="{name}" value="{UI.escape(str(value))}" placeholder="{UI.escape(placeholder)}" class="module-select" style="{kwargs.get("style","width:100%;")}" {extra}>'
+
+    @staticmethod
+    def select(name, options, selected="", **kwargs):
+        """options: list of (value,label) tuples or plain strings - same shape SettingField already builds."""
+        opts = "".join(f'<option value="{UI.escape(str(v))}" {"selected" if str(v)==str(selected) else ""}>{UI.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in options))
+        return f'<select name="{name}" class="module-select" style="{kwargs.get("style","width:100%;")}" {UI.htmx_html(kwargs.get("htmx", {}))}>{opts}</select>'
+
+    @staticmethod
+    def textarea(name, value="", rows=4, placeholder="", **kwargs): return f'<textarea name="{name}" rows="{rows}" placeholder="{UI.escape(placeholder)}" class="module-select" style="{kwargs.get("style","width:100%;font-family:inherit;resize:vertical;")}">{UI.escape(value)}</textarea>'
+
+    @staticmethod
+    def checkbox(name, checked=False, value="1", **kwargs): return f'<input type="checkbox" name="{name}" value="{value}" {"checked" if checked else ""} {UI.htmx_html(kwargs.get("htmx", {}))}>'
+
+    @staticmethod
+    def dropdown(name: str, options, htmx_dict: dict = None, default_text: str = None):
+        """options: list of tuples -> [(value, display_text), ...]"""
+        if isinstance(options, str): options = [(o.strip(), o.strip()) for o in options.split(',') if o.strip()]
+        opts = f"<option value=''>{default_text}</option>" if default_text else ""
+        opts += "".join([f'<option value="{UI.escape(val)}">{UI.escape(text)}</option>' for val, text in options])
+        return f'<select name="{name}" class="module-select" style="background:var(--bg); border:var(--border-thick) solid var(--border); color:var(--text); padding:0.3rem; border-radius:var(--radius); width:100%;" {UI.htmx_html(htmx_dict) if htmx_dict else ""}>{opts}</select>'
+
+    @staticmethod
+    def text_input(name, hint="...", **kwargs):
+        id = f"id='{kwargs.get('id')}'" if 'id' in kwargs else ''
+        value = f"value='{kwargs.get('value')}'" if 'value' in kwargs else ''
+        return f"""<input type="kwargs.get('type_', 'text')" {id}{value}{kwargs.get('extra')}name="{name}" placeholder="{hint}" class="module-select" style="background:var(--bg); border:var(--border-thick) solid var(--border); color:var(--text); border-radius:var(--radius); padding:0.4rem 0.6rem; width:100%; box-sizing:border-box;">"""
+
+    @staticmethod
+    def table(headers: list, rows: list, conditional_fn = None):
+        """Table or Spreadsheet with conditional and Excel-compatible logic (Accounting, )"""
+        th_style = "padding: 0.8rem; border-bottom: 2*var(--border-thick) solid var(--border); text-align: left; font-size: 0.9rem;"
+        thead = "".join([f"<th style='{th_style}'>{h}</th>" for h in headers])
+        tbody = "".join(["<tr>" + "".join([f"<td style='padding: 0.5rem; border-bottom: var(--border-thick) solid var(--border); {conditional_fn(c) if conditional_fn else ''}'>{c}</td>" for c in row]) + "</tr>" for row in rows])
+        return f"<div style='overflow-x: auto;'><table style='width: 100%; border-collapse: collapse;'><thead>{thead}</thead><tbody>{tbody}</tbody></table></div>"
+
+    @staticmethod
+    def collapsible(title: str, content: str, open_: bool = False) -> str: return f'<details {"open" if open_ else ""} style="margin-bottom:0.8rem;"><summary style="font-size:0.8rem;font-weight:600;color:var(--text_muted);cursor:pointer;padding:0.3rem 0;">{title}</summary><div style="padding:0.4rem 0;">{content}</div></details>'
+
+    # --- Tree Viewer and Helpers ---
+
+    _TREE_ICONS = {".py":"&#x1F40D;", ".js":"&#x26A1;", ".ts":"&#x26A1;", ".json":"&#x1F4CB;", ".yaml":"&#x1F4CB;", ".yml":"&#x1F4CB;", ".toml":"&#x1F4CB;", ".xml":"&#x1F4CB;", ".md":"&#x1F4DD;", ".txt":"&#x1F4C4;", ".rst":"&#x1F4C4;", ".csv":"&#x1F4CA;", ".sh":"&#x2699;", ".html":"&#x1F310;", ".css":"&#x1F3A8;", ".png":"&#x1F5BC;", ".jpg":"&#x1F5BC;", ".jpeg":"&#x1F5BC;", ".gif":"&#x1F5BC;", ".webp":"&#x1F5BC;", ".svg":"&#x1F5BC;", ".pdf":"&#x1F4D5;", ".zip":"&#x1F4E6;", ".tar":"&#x1F4E6;", ".gz":"&#x1F4E6;", ".db":"&#x1F5C4;", ".log":"&#x1F4DC;"}
+    _TREE_ICON_DEFAULT = "&#x1F4C4;"
+    _TREE_ICON_FOLDER  = "&#x1F4C1;"
+    _TREE_SKIP_DIRS = frozenset({".git", "__pycache__", ".ipynb_checkpoints", ".mypy_cache", ".pytest_cache", "node_modules", ".trash", ".venv", "venv", ".tox", ".ruff_cache"})
+    _TREE_SKIP_SUFFIXES = frozenset({".bak", ".pyc", ".pyo"})
+    _TREE_CTX = OrderedDict()   # token -> one drawn file tree's settings (filters included), so a closed folder is filled in when it is opened; the newest 500 trees are kept
+
+    @staticmethod
+    def tree_children(token: str, rel: str, depth: int) -> str:
+        """The rows of one folder of a file tree drawn earlier, when that folder is opened (GET /ui/tree). The tree's own settings, filters and permissions are reused."""
+        ctx = UI._TREE_CTX.get(token)
+        if not ctx: return '<div style="font-size:.7rem;color:var(--text_muted);padding:.2rem .4rem">This list is older than the server - reload the page.</div>'
+        p = (ctx["rel_to"] / rel).resolve()
+        return UI.tree(path=p.as_posix(), depth=depth, _ctx=token) if p.is_relative_to(ctx["rel_to"]) else ""
+
+    @staticmethod
+    def tree(items=None, path=None, selected=None, active=None, post_url=None, target=None, swap="outerHTML", rel_to=None, depth=0, extra_vals=None, selectable=False, mode="file", options=None, visible_fn=None, label_fn=None, **kwargs) -> str:
+        """Filesystem tree relying strictly on absolutely resolved in-memory registry slices. Zero disk I/O."""
+        options = options or {}
+        active = active if isinstance(active, (set, frozenset)) else ({active} if active else set())
+        if path is None and items is not None and mode == "file": path = items
+        if mode == "file" and path is not None:
+            path_obj = pathlib.Path(path).resolve()
+            path_str = path_obj.as_posix()
+            token = kwargs.get("_ctx")
+            if not token:   # a new tree: its settings are kept under a token; folders that are not open are drawn closed and filled in from it when opened, so a large folder costs nothing until it is looked at
+                token = secrets.token_urlsafe(9)
+                UI._TREE_CTX[token] = {"post_url": post_url or options.get("post"), "target": target or options.get("target"), "swap": options.get("swap", swap), "extra_vals": extra_vals or options.get("extra_vals") or {}, "selected": selected or set(), "active": active,
+                                       "rel_to": pathlib.Path(rel_to).resolve() if rel_to else path_obj, "selectable": selectable, "visible_fn": visible_fn, "label_fn": label_fn, "ctx_url": kwargs.get("context_menu_url", "")}
+                while len(UI._TREE_CTX) > 500: UI._TREE_CTX.popitem(last=False)
+            c = UI._TREE_CTX[token]
+            post_url, target, swap, extra_vals, selected, active, rel_to_obj, selectable, visible_fn, label_fn, ctx_url = c["post_url"], c["target"], c["swap"], c["extra_vals"], c["selected"], c["active"], c["rel_to"], c["selectable"], c["visible_fn"], c["label_fn"], c["ctx_url"]
+            # Check Memory Registry instead of disk
+            current_node = FileStructure.get_node(path_str)
+            if not current_node:  return f'<div style="font-size:.7rem;color:var(--text_muted);padding:.3rem .4rem">Not found in registry: <code style="font-size:.62rem">{path_str}</code></div>'
+            children_data = FileStructure.get_synchronous_slice(path_str)
+            if not children_data: return '<div style="font-size:.7rem;color:var(--text_muted);padding:.2rem .4rem">Empty</div>'
+            out = ""
+            for child_abs_str, child_node in children_data:
+                child_path_obj = pathlib.Path(child_abs_str)
+                rel_str = str(child_path_obj.relative_to(rel_to_obj)).replace("\\", "/")
+                # Apply visible_fn filter if provided based on relative path
+                if visible_fn and not visible_fn(rel_str): continue
+                is_dir = (child_node["type"] == "folder")
+                vals = {**extra_vals, "path": rel_str, "is_dir": str(is_dir).lower(), "label": child_node["name"], "id": f"tree-{abs(hash(rel_str)) % 0xFFFFFF:06x}"}
+                vals_json = json.dumps(vals).replace("'", "&#39;")
+                hx_attrs = f"""hx-post="{post_url}" hx-vals='{vals_json}' hx-target="{target}" hx-swap="{swap}" hx-trigger='{"change" if selectable else "click"}'""" if post_url else ""
+                pl = f"{depth * 0.72:.2f}rem"
+                is_active = rel_str in active
+                ctx_btn = f"""<span style="flex-shrink:0;position:relative">
+                                  <button class="btn-icon tree-ctx-btn" style="font-size:.6rem;padding:.05rem .2rem;opacity:.18;transition:opacity .12s" onclick="event.stopPropagation(); var d=this.nextElementSibling; d.style.display=d.style.display==='block'?'none':'block'">&#x22EE;</button>
+                                  <div class="tree-ctx-menu" style="display:none;position:absolute;right:0;top:1.2rem;background:var(--bg_panel);border:var(--border-thick) solid var(--border);border-radius:var(--radius); z-index:500; min-width:8rem; box-shadow:0 .25rem .8rem rgba(0,0,0,.4)">
+                                      <div hx-get="{ctx_url}?path={urllib.parse.quote(rel_str)}" hx-trigger="intersect once" hx-target="this" hx-swap="innerHTML"></div>
+                                   </div>
+                              </span>""" if ctx_url else ""
+                if is_dir:
+                    tot_n = child_node.get("child_files_count", 0)
+                    # For selection counting without walking the tree, we check the global selected set against this path prefix
+                    sel_n = sum(1 for s in selected if s.startswith(rel_str + "/")) if tot_n else 0
+                    cb = f"""<input type="checkbox" {"checked" if tot_n and sel_n == tot_n else ""} class="{'tree-cb-partial' if sel_n and sel_n != tot_n else ''}" {hx_attrs}>""" if selectable and hx_attrs else ""   # sel_n over tot_n: ticked entries for files no longer on disk - shown as partial, not as all
+                    count = f"""<span style="font-size:.6rem;margin-left:.15rem;{"color:var(--accent);font-weight:600" if sel_n else "color:var(--text_muted)"}">({sel_n}/{tot_n})</span>""" if tot_n and selectable else ""
+                    folder_open = any(a == rel_str or a.startswith(rel_str + "/") for a in active)
+                    lazy = "" if folder_open else f"""hx-get="/ui/tree?ctx={token}&amp;rel={urllib.parse.quote(rel_str)}&amp;depth={depth + 1}" hx-trigger="toggle once" hx-target="find .tree-lazy" hx-swap="outerHTML" hx-on::response-error="var l=this.querySelector('.tree-lazy'); if(l) l.textContent='could not open this folder (HTTP '+event.detail.xhr.status+') - see the server log'" hx-on::send-error="var l=this.querySelector('.tree-lazy'); if(l) l.textContent='could not reach the server - reload the page'\""""   # a failed load says so instead of leaving the placeholder
+                    children = UI.tree(path=child_abs_str, depth=depth + 1, _ctx=token) if folder_open else f"""<div class="tree-lazy" style="font-size:.65rem;color:var(--text_muted);padding:.1rem .3rem .1rem {(depth + 1) * 0.72:.2f}rem">&#x2026;</div>"""
+                    out += f"""<details {"open" if folder_open else ""} class="{"tree-active" if is_active else ""}" style="margin:0;padding-inline-start:0" {lazy}>
+                                   <summary class="tree-fs-row" style="padding:.18rem .3rem .18rem {pl};font-size:.7rem;cursor:pointer;list-style:none;display:flex;align-items:center;gap:.28rem;user-select:none;border-bottom:var(--border-thick) solid var(--border)">
+                                       {cb}
+                                       <span class="tree-caret" style="opacity:.5;flex-shrink:0;font-size:.5rem;display:inline-block;transition:transform .12s">&#x25B6;</span>
+                                       <span style="flex-shrink:0">{UI._TREE_ICON_FOLDER}</span>
+                                       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;{"color:var(--accent)" if sel_n else ""}">{UI.escape(label_fn(child_node["name"]) if label_fn else child_node["name"])}</span>
+                                       {count}
+                                       {ctx_btn}
+                                    </summary>
+                                    {children}
+                                </details>"""
+                else:
+                    icon = UI._TREE_ICONS.get(child_node.get("suffix", ""), UI._TREE_ICON_DEFAULT)
+                    cb = f'<input type="checkbox" {"checked" if rel_str in selected else ""} {hx_attrs}>' if selectable and hx_attrs else ""
+                    row_hx = hx_attrs if not selectable and hx_attrs else ""
+                    size_val = child_node.get("size", 0)
+                    size_str = f"{size_val//1024:.0f}K" if size_val >= 1024 else f"{size_val}B"
+                    out += f"""<div class="tree-fs-row {"tree-active" if is_active else ""}" style="cursor:pointer;padding:.1rem .3rem .1rem {pl};display:flex;align-items:center;gap:.3rem;font-size:.7rem;border-bottom:var(--border-thick) solid var(--border)" {row_hx}>
+                                   {cb}
+                                   <span style="flex:1;color:{"var(--accent)" if rel_str in selected else "var(--text)"};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{icon} {UI.escape(label_fn(child_node["name"]) if label_fn else child_node["name"])}</span>
+                                   <span style="flex-shrink:0;color:var(--text_muted);font-size:.63rem">{size_str}</span>
+                                   {ctx_btn}
+                               </div>"""
+            return out
+
+        if "pre-built" not in options:
+            items = UI._build_dict_tree(items) if mode == "dict" else UI._build_file_tree(items)
+            options["pre-built"] = True
+        indent = depth * .96
+        html = ""
+        for item in items:
+            name, node_type, item_path, children = item.get("name", "Unnamed"), item.get("type", "value"), item.get("path", ""), item.get("children", [])
+            icon, is_active = UI._icon_for(node_type), item_path in active
+            row_cls = "tree-active" if is_active else ""
+            if children:
+                html += f'<details class="tree-node {row_cls}" style="padding-left:{indent}rem;"><summary class="tree-summary" style="display:flex;align-items:center;gap:.3rem;cursor:pointer;list-style:none"><span class="tree-icon">{icon}</span><span class="tree-label" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{UI.escape(name)}</span>{UI._context_menu(UI.escape(item_path), mode)}</summary>{UI.tree(children, mode=mode, depth=depth+1, options=options, active=active)}</details>'
+            else:
+                if "action" in options:
+                    htmx_attrs = options["action"]
+                else:
+                    vals = {"action": "open", "path": item_path}
+                    vals.update(options.get("extra_vals", {}))
+                    vals_json = json.dumps(vals).replace("'", "&#39;")
+                    htmx_attrs = UI.htmx_html({"post": options.get("post", "/open"), "target": options.get("target", "#content"), "swap": options.get("swap", "none"), "vals": vals_json})
+                html += f'<div class="tree-leaf {row_cls}" style="padding-left:{indent}rem;display:flex;align-items:center;gap:.3rem;{"cursor:pointer;" if htmx_attrs else ""}" {htmx_attrs}><span class="tree-icon">{icon}</span><span class="tree-label" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{UI.escape(name)}</span>{UI._context_menu(UI.escape(item_path), mode)}</div>'
+        return html
+
+    @staticmethod
+    def _icon_for(node_type): return {"folder": "&#x1F4C1;", "file": "&#x1F4C4;", "dict": "{}", "list": "[]", "value": "-"}.get(node_type, "&#x1F4C4;")
+
+    @staticmethod
+    def _context_menu(path, mode): return f"""<span class="tree-menu" onclick="openContextMenu(event,&quot;{path.replace("'", "&#39;").replace('"', "&quot;")}&quot;,&quot;{mode.replace("'", "&#39;")}&quot;)">&#x22EE;</span>""" if path else ""
+
+    @staticmethod
+    def _build_dict_tree(data):
+        items = []
+        if isinstance(data, dict):
+            for k, v in data.items(): items.append({"name": str(k), "path": str(k), "type": "dict" if isinstance(v, dict) else "list" if isinstance(v, list) else "value", "children": UI._build_dict_tree(v) if isinstance(v, (dict, list)) else []})
+        elif isinstance(data, list):
+            for i, v in enumerate(data): items.append({"name": f"[{i}]", "path": str(i), "type": "dict" if isinstance(v, dict) else "list" if isinstance(v, list) else "value", "children": UI._build_dict_tree(v) if isinstance(v, (dict, list)) else []})
+        return items
+
+    # --- Layout ---
+
+    @staticmethod
+    def layout_grid(content, cols=2): return f'<div style="display:grid; grid-template-columns: repeat({cols}, 1fr); gap:1rem;">{content}</div>'
+
+    # --- Generic Directory Listing ---
+
+    @staticmethod
+    def list_children(path, rel_to=None, filter_fn=None, dirs_only=False, skip_hidden=True) -> list:
+        """Returns [(rel_path, Path, is_dir), ...] for one directory level, dirs-first/name-sorted.
+        filter_fn(rel_path)->bool excludes an entry - for a directory this also prunes its entire subtree, since the caller never recurses into something this returns. dirs_only drops files (folder pickers)."""
+        path = pathlib.Path(path)
+        rel_to = pathlib.Path(rel_to).resolve() if rel_to else path.resolve()
+        try: entries = sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+        except (PermissionError, FileNotFoundError): return []
+        out = []
+        for item in entries:
+            if skip_hidden and item.name.startswith("."): continue
+            if item.is_dir() and item.name in UI._TREE_SKIP_DIRS: continue
+            if item.is_file() and item.suffix.lower() in UI._TREE_SKIP_SUFFIXES: continue
+            if dirs_only and not item.is_dir(): continue
+            rel = str(item.relative_to(rel_to)).replace("\\", "/")
+            if filter_fn and not filter_fn(rel): continue
+            out.append((rel, item, item.is_dir()))
+        return out
+
+    @staticmethod
+    def theme_editor_panel(current: dict, save_url: str, title: str = "Theme", extra_actions: str = "", presets: dict = None) -> str:
+        """Reusable key/value theme editor. `current` is the already-resolved dict to display.
+        Parametrized purely by save_url so server-default, module-default, and per-module user-override all reuse this one renderer instead of three copies.
+        presets: {name: theme dict} offered in a "Load a saved theme" select that fills the editor (nothing is stored until Save)."""
+        system_vars = set()
+        for candidate in ("frontend/templates/base.html", "templates/base.html", "base.html"):
+            try: system_vars = set(re.findall(r"--([a-zA-Z0-9_-]+)[:)]", open(candidate).read())); break
+            except OSError: pass
+        pid = f"tp{abs(hash(save_url))%0xFFFFFF:06x}"
+        rows_html = ""
+        for key in theme_field_order(current):
+            value = current[key]
+            is_system = key in system_vars
+            label, hint = theme_label(key)
+            badge = f'<span style="font-size:0.6rem;color:{"var(--accent)" if is_system else "var(--text_muted)"};opacity:0.8;">{"sys" if is_system else "custom"}</span>'
+            hint_html = f'<span style="font-size:0.6rem;color:var(--text_muted);line-height:1.2;">{UI.escape(hint)}</span>' if hint else ""
+            is_color = _is_color(value)
+            color_style = "width:38px;height:30px;padding:2px;cursor:pointer;border-radius:4px;" if is_color else "display:none;"
+            rows_html += f"""<div class="theme-row" style="display:grid;grid-template-columns:1fr 1.5fr 32px;gap:0.7rem;align-items:center;padding:0.4rem 0.5rem;border-bottom:1px solid var(--border);">
+              <div style="display:flex;flex-direction:column;gap:0.15rem;"><span style="font-size:0.82rem;color:var(--text);">{UI.escape(label)}</span><span style="display:flex;gap:0.3rem;align-items:center;">{badge}<input type="text" class="key-input" value="{key}" readonly title="theme variable name" style="opacity:0.5;background:var(--bg);border:none;color:var(--text_muted);padding:0.1rem 0.2rem;font-size:0.62rem;font-family:monospace;width:100%;box-sizing:border-box;"></span>{hint_html}</div>
+              <div style="display:flex;gap:0.4rem;align-items:center;">
+                <input type="color" value="{_color_hex(value)}" oninput="td_pick_{pid}(this)" style="{color_style}">
+                <input type="text" value="{value}" class="val-input" oninput="td_sync_{pid}(this)" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;min-width:0;">
+              </div>
+              <button type="button" onclick="this.closest('.theme-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;padding:0;">&#x2715;</button>
+            </div>"""
+        presets_js = json.dumps(presets or {}).replace("</", "<\\/")   # safe inside the <script> block
+        preset_opts = "".join(f"""<option value="{UI.escape(n)}">{UI.escape(n)}</option>""" for n in (presets or {}))
+        preset_pick = f"""<select onchange="if(this.value) td_load_{pid}(TD_PRESETS_{pid}[this.value]); this.value=''" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);width:100%;margin-bottom:0.6rem;"><option value="">Load a saved theme into the editor...</option>{preset_opts}</select>""" if presets else ""
+        return f"""
+        <div id="{pid}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+            <h3 style="margin:0;">{title}</h3>
+            <div style="display:flex;gap:0.4rem;">
+              <button type="button" class="button" onclick="td_dl_{pid}()" style="padding:0.3rem 0.6rem;" title="Export JSON">&#x1F4E5;</button>
+              <button type="button" class="button" onclick="document.getElementById('up-{pid}').click()" style="padding:0.3rem 0.6rem;" title="Import JSON">&#x1F4E4;</button>
+              <input type="file" id="up-{pid}" style="display:none" accept=".json" onchange="td_ul_{pid}(this)">
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1.5fr 32px;gap:0.7rem;padding:0.3rem 0.5rem;font-size:0.7rem;color:var(--text_muted);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);margin-bottom:0.3rem;">
+            <div>Variable</div><div>Value</div><div></div>
+          </div>
+          {preset_pick}
+          <div id="list-{pid}" style="max-height:42vh;overflow-y:auto;">{rows_html}</div>
+          <div style="display:flex;gap:0.5rem;margin-top:0.8rem;padding:0.8rem;border:2px dashed var(--border);border-radius:var(--radius);">
+            <input type="text" id="nk-{pid}" placeholder="variable_name" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);min-width:0;">
+            <input type="text" id="nv-{pid}" placeholder="#hex or value" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.4rem;border-radius:var(--radius);min-width:0;">
+            <button type="button" class="button" onclick="td_add_{pid}()">Add</button>
+          </div>
+          {extra_actions}
+          <div style="display:flex;gap:0.5rem;margin-top:0.8rem;">
+            <button type="button" class="button" style="flex:1;" onclick="td_save_{pid}()">&#x1F4BE; Save</button>
+          </div>
+          <script>
+            function td_h2r_{pid}(h){{h=h.replace('#','');return [0,2,4].map(i=>parseInt(h.substr(i,2),16));}}
+            function td_pick_{pid}(c){{var t=c.nextElementSibling,m=t.value.trim().match(/rgba?\\(([^)]*)\\)/),r=td_h2r_{pid}(c.value);
+              if(m){{var p=m[1].split(',').map(s=>s.trim()),a=p.length>3?p[3]:'1'; t.value='rgba('+r[0]+', '+r[1]+', '+r[2]+', '+a+')';}} else t.value=c.value;}}
+            function td_sync_{pid}(t){{var c=t.previousElementSibling,v=t.value.trim();try{{if(v[0]=='#')c.value=(v+'000000').slice(0,7);else{{var m=v.match(/rgba?\\((\\d+)[,\\s]+(\\d+)[,\\s]+(\\d+)/);if(m)c.value='#'+[1,2,3].map(i=>(+m[i]).toString(16).padStart(2,'0')).join('');}}}}catch(e){{}}}}
+            function td_data_{pid}(){{ const o={{}}; document.querySelectorAll('#list-{pid} .theme-row').forEach(r=>{{const k=r.querySelector('.key-input')?.value?.trim(),v=r.querySelector('.val-input')?.value?.trim(); if(k) o[k]=v||'';}}); return o; }}
+            function td_add_{pid}(){{
+              const k=document.getElementById('nk-{pid}'),v=document.getElementById('nv-{pid}'); if(!k.value.trim()) return;
+              const isColor=v.value.startsWith('#'); const cs=isColor?'width:38px;height:30px;padding:2px;cursor:pointer;border-radius:4px;':'display:none;';
+              document.getElementById('list-{pid}').insertAdjacentHTML('beforeend',`
+                <div class="theme-row" style="display:grid;grid-template-columns:1fr 1.5fr 32px;gap:0.7rem;align-items:center;padding:0.4rem 0.5rem;border-bottom:1px solid var(--border);">
+                  <div style="display:flex;flex-direction:column;gap:0.1rem;"><span style="font-size:0.6rem;color:var(--text_muted);">custom</span><input type="text" class="key-input" value="${{k.value}}" style="background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;font-family:monospace;width:100%;box-sizing:border-box;"></div>
+                  <div style="display:flex;gap:0.4rem;align-items:center;"><input type="color" value="${{isColor?v.value:'#ffffff'}}" oninput="this.nextElementSibling.value=this.value" style="${{cs}}"><input type="text" value="${{v.value}}" class="val-input" oninput="this.previousElementSibling.value=this.value" style="flex:1;background:var(--bg);border:var(--border-thick) solid var(--border);color:var(--text);padding:0.3rem 0.4rem;border-radius:var(--radius);font-size:0.78rem;min-width:0;"></div>
+                  <button type="button" onclick="this.closest('.theme-row').remove()" style="background:none;border:none;color:#ff5f5f;cursor:pointer;font-size:1rem;padding:0;">&#x2715;</button>
+                </div>`);
+              k.value=''; v.value='';
+            }}
+            const TD_PRESETS_{pid}={presets_js};
+            function td_load_{pid}(cfg){{ if(!cfg) return; document.getElementById('list-{pid}').innerHTML=''; const k=document.getElementById('nk-{pid}'),v=document.getElementById('nv-{pid}'); Object.entries(cfg).forEach(([a,b])=>{{ k.value=a; v.value=String(b); td_add_{pid}(); }}); }}
+            async function td_save_{pid}(){{ const r=await fetch('{save_url}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(td_data_{pid}())}}); if(r.ok) window.location.reload(); }}
+            function td_dl_{pid}(){{ const blob=new Blob([JSON.stringify(td_data_{pid}(),null,2)],{{type:'application/json'}}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='theme.json'; a.click(); }}
+            function td_ul_{pid}(input){{
+              const file=input.files[0]; if(!file) return; const reader=new FileReader();
+              reader.onload=async(e)=>{{ try{{ const cfg=JSON.parse(e.target.result); const r=await fetch('{save_url}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(cfg)}}); if(r.ok) window.location.reload(); }}catch(err){{alert('Invalid JSON');}} }};
+              reader.readAsText(file);
+            }}
+          </script>
+        </div>"""
+
+def load_theme_packs(themes_dir: str = "./data/_themes") -> None:
+    """Merges .json or .css theme packs from themes_dir into DEFAULT_THEMES at import time, keyed by filename stem.
+    JSON packs: flat dict of the same keys as DEFAULT_THEMES['dark']. CSS packs: any `--var: value;` lines are parsed into the same shape. Additive only - never touches the built-in 'dark'/'light' entries.
+    Drop a file in and it appears everywhere DEFAULT_THEMES is read (control panel's theme switcher already iterates DEFAULT_THEMES.items() dynamically - zero further code needed for a pack to become selectable)."""
+    d = pathlib.Path(themes_dir)
+    if not d.exists(): return
+    for f in d.glob("*.json"):
+        if f.stem in ("dark", "light"): continue
+        try:
+            cfg = json.loads(f.read_text(encoding="utf-8"))
+            cfg.setdefault("name", f.stem.replace("_", " ").title())
+            DEFAULT_THEMES[f.stem] = cfg
+        except Exception as e: print(f"[style] theme pack '{f.name}' failed to load: {e}")
+    for f in d.glob("*.css"):
+        if f.stem in ("dark", "light"): continue
+        try:
+            cfg = {m.group(1): m.group(2).strip() for m in re.finditer(r'--([\w-]+)\s*:\s*([^;]+);', f.read_text(encoding="utf-8"))}
+            if cfg:
+                cfg.setdefault("name", f.stem.replace("_", " ").title())
+                DEFAULT_THEMES[f.stem] = cfg
+        except Exception as e: print(f"[style] theme pack '{f.name}' failed to load: {e}")
+
+def get_module_default_theme(module_ns: str) -> dict:
+    p = pathlib.Path(f"./data/{module_ns}/theme_default.json")
+    try: return json.loads(p.read_text()) if p.exists() else {}
+    except Exception: return {}
+
+def set_module_default_theme(module_ns: str, cfg: dict) -> None:
+    p = pathlib.Path(f"./data/{module_ns}/theme_default.json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2))
+
+load_theme_packs()

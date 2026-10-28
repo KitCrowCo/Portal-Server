@@ -1,0 +1,3015 @@
+# built_ins.py
+
+import re, json, uuid, difflib, os, html, shutil, asyncio, time, copy, base64, datetime
+import base64
+import mimetypes
+import hashlib
+from fastapi import HTTPException
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from .style import UI, STYLE_GROUPS
+from .state import get_state, set_state, clear_state, clear_session
+from .interface_manager import push_update
+from .file_server import notify_manual_mutation
+from PIL import Image as _PILImageThumb
+import openpyxl
+import pypdf
+
+# Three processing depths, selected via the `mode` argument:
+#   "standard"   - CommonMark-compatible subset only. Safe for untrusted input.
+#                  Headers, bold, italic, links, images, blockquotes, code (inline + fenced), ordered/unordered lists, horizontal rules, tables, strikethrough, task lists, footnotes, heading IDs, definition lists, highlights, sub/superscript, emoji shortcodes.
+#   "extended"   - (default) standard + KCC portal extensions:
+#                  Style-group injection ((@group_name)), layout containers ((glass)), ((row)), ((col)), ((grid: N)), (()), and the inline HTML passthrough (HTML tags are preserved, not escaped).
+#   "portal"     - extended + interactive portal widgets:
+#                  [[Pick: ...]], [[Input: ...]], [[Action: ...]], [[Table: ...]], [[Plot: ...]], [[Status: ...]], [[Chat: ...]]
+#
+# HTML passthrough:
+#   In "standard" mode, raw HTML tags are escaped.
+#   In "extended" and "portal" modes, <tag></tag> is passed through as-is so authors can embed arbitrary HTML inline with markdown.
+
+mimetypes.add_type("image/svg+xml", ".svg")
+
+# Standard emoji shortcode table (Unicode escape sequences)
+_EMOJI = {
+    "joy": "\\U0001F602",       # 😂
+    "smile": "\\U0001F604",     # 😄
+    "thumbsup": "\\U0001F44D",  # 👍
+    "thumbsdown": "\\U0001F44E",# 👎
+    "heart": "\\U00002764",     # ❤
+    "fire": "\\U0001F525",      # 🔥
+    "check": "\\U00002705",     # ✅
+    "x": "\\U0000274C",         # ❌
+    "warn": "\\U000026A0",      # ⚠️
+    "info": "\\U00002139",      # ℹ️
+    "star": "\\U00002B50",      # ⭐
+    "rocket": "\\U0001F680",    # 🚀
+    "bug": "\\U0001F41B",       # 🐛
+    "wrench": "\\U0001F527",    # 🔧
+    "lock": "\\U0001F512",      # 🔒
+    "unlock": "\\U0001F513",    # 🔓
+    "eyes": "\\U0001F440",      # 👀
+    "wave": "\\U0001F44B",      # 👋
+    "clap": "\\U0001F44F",      # 👏
+    "100": "\\U0001F4AF",       # 💯
+    "thinking": "\\U0001F914",  # 🤔
+    "tada": "\\U0001F389",      # 🎉
+    "zap": "\\U000026A1",       # ⚡
+    "memo": "\\U0001F4DD",      # 📝
+}
+
+# --- Text Sanitization ---
+# Targeted repair for known double-encoded UTF-8 corruption that's leaked into this codebase's copy/paste history.
+# Deterministic substring map only - no heuristic latin1/utf8 round-tripping, which would risk mangling legitimate non-ASCII content (names, CJK text) in user documents.
+
+_MOJIBAKE_FIXES = {"\u256c\u00f4\u00a2\u00f4": "&#x2713;", "\u256c\u00f4\u00e7\u00ac": "&#x2026;", "\u256c\u00f4\u00d1\u0393\u00ce\u00d3": "&#x21A9;"}
+
+def clean_mojibake(text: str) -> str:
+    """Repairs known corrupted-character sequences. Safe no-op on clean text."""
+    for bad, good in _MOJIBAKE_FIXES.items(): text = text.replace(bad, good)
+    return text
+
+# --- Sanitization ---
+# Rules live in an external, hot-reloaded text file (not JSON - comments and two rule kinds need more than JSON gives cleanly). Re-read on every call: rule files are tiny and change rarely, so the simplicity of no caching/invalidation outweighs the reread cost.
+
+SANITIZE_RULES_PATH = Path("./data/sanitize_rules.txt")
+
+def _ensure_sanitize_rules():
+    if SANITIZE_RULES_PATH.exists(): return
+    SANITIZE_RULES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    seed = ("""# Sanitization rules for clean_text(). One rule per line.
+            #   literal:<bad>=><good>   - exact substring replace
+            #   regex:<pattern>=><repl> - re.sub, Python regex syntax (\\1 backrefs ok)
+            # '#' lines and blanks ignored. Edit freely - no restart needed.\n\n""" +
+            f"""literal:{chr(0x256c)}{chr(0x00f4)}{chr(0x00a2)}{chr(0x00f4)}=>&#x2713; literal:{chr(0x256c)}{chr(0x00f4)}{chr(0x00e7)}{chr(0x00ac)}=>&#x2026;\n""")
+    SANITIZE_RULES_PATH.write_text(seed, encoding="utf-8")
+
+def _load_sanitize_rules() -> list[tuple[str,str,str]]:
+    _ensure_sanitize_rules()
+    rules = []
+    for line in SANITIZE_RULES_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=>" not in line: continue
+        kind, _, rest = line.partition(":")
+        pattern, _, repl = rest.partition("=>")
+        if kind in ("literal","regex"): rules.append((kind, pattern, repl))
+    return rules
+
+def clean_text(text: str) -> str:
+    """Repairs known corrupted/double-encoded sequences via data/sanitize_rules.txt. Safe no-op on clean text."""
+    for kind, pattern, repl in _load_sanitize_rules(): text = text.replace(pattern, repl) if kind == "literal" else re.sub(pattern, repl, text)
+    return text
+
+clean_mojibake = clean_text  # backward-compat alias
+_FS_UNSAFE = re.compile(r'[\x00-\x1f<>:"/\\|?*\x7f]')
+
+def sanitize_filename(name: str, default: str = "untitled") -> str:
+    """Strips characters unsafe across Windows/Linux filesystems and URL query strings, collapses whitespace, preserves the extension. Not ASCII-only - non-Latin names pass through untouched."""
+    name = clean_text(name).strip()
+    stem, ext = (name.rpartition(".")[0], name.rpartition(".")[2]) if "." in name[1:] else (name, "")
+    stem = _FS_UNSAFE.sub("_", stem).strip(" .") or default
+    return f"{stem}.{ext}" if ext else stem
+
+# -- Helpers --
+
+def _url(*parts): return "/".join(p.strip("/") for p in [_P, *parts] if p)
+
+# --- Markdown Block Rendering Helpers ---
+# Anything here produces opaque, pre-rendered HTML that gets stashed as a single \x00CODE{n}\x00 token by md_plus_transpiler, the same protection mechanism fenced code already used. This is what fixes loose_breaks (every-Enter-is-a-break) corrupting graphviz/details output - a multi-line block that never enters the paragraph splitter as raw text can't be mangled by it.
+
+_TABSET_OPEN = re.compile(r'^(#{1,6})[ \t]+(.*?)[ \t]+\{\.tabset\}[ \t]*$')
+_TABSET_END = re.compile(r'^\{end\.tabset\}[ \t]*$')
+_HEADER = re.compile(r'^(#{1,6})[ \t]')
+
+def _extract_tabsets(lines: list[str]) -> tuple[list[str], list[dict]]:
+    """Single pass, stack-based. Returns (lines_with_tabset_bodies_removed, tabset_records). A tabset closes on: {end.tabset}, a header at level <= its own level, or EOF."""
+    stack = []  # [{level, title, start, children_start}]
+    records = []
+    out = []
+    for i, line in enumerate(lines):
+        end_m = _TABSET_END.match(line)
+        open_m = _TABSET_OPEN.match(line)
+        hdr_m = _HEADER.match(line) and not open_m
+        # Close any open tabset whose boundary this line satisfies
+        while stack and (end_m or (hdr_m and len(hdr_m.group(1)) <= stack[-1]["level"])):
+            top = stack.pop()
+            records.append({**top, "end": i, "body": lines[top["start"]+1:i]})
+            if end_m: break  # {end.tabset} closes exactly one level, then this line is consumed
+        if end_m: continue  # marker line itself is not content
+        if open_m:
+            stack.append({"level": len(open_m.group(1)), "title": open_m.group(2).strip(), "start": i})
+            continue
+        out.append(line)
+    while stack:  # unclosed at EOF
+        top = stack.pop()
+        records.append({**top, "end": len(lines), "body": lines[top["start"]+1:]})
+    return out, records
+
+MD_BLOCK_CSS = """
+.graphviz-wrapper{background:transparent;max-width:100%;overflow:auto;}
+.graphviz-wrapper svg{max-width:100%;height:auto;display:block;}
+.graphviz-dot-source{display:none;}
+.graphviz-copy-dot{right:2.6rem !important;}
+.graphviz-copy-btn,.graphviz-copy-dot{position:absolute; top:.2rem; right:.2rem; z-index:5; background:var(--bg_panel); border:var(--border-thick) solid var(--border); color:var(--text_muted); border-radius:.3rem; padding:.1rem .3rem; cursor:pointer; font-size:.7rem;}
+.graphviz-copy-btn:hover,.graphviz-copy-dot:hover{color:var(--accent); border-color:var(--accent);}
+.md-details{border:var(--border-thick) solid var(--border);border-radius:var(--radius);margin:.5rem 0;overflow:hidden;}
+.md-details summary{cursor:pointer;padding:.4rem .6rem;font-weight:600;list-style:none;user-select:none;}
+.md-details summary::-webkit-details-marker{display:none;}
+.md-details summary::before { content: '\25B6'; display: inline-block; width: 1.2em; font-size:0.8em; transition: transform 0.2s ease; }
+.md-details[open] summary::before { transform: rotate(90deg); }
+.md-details-body{padding:.4rem .8rem .6rem;border-top:var(--border-thick) solid var(--border);}
+.md-task-done{text-decoration:line-through; opacity:.55;}
+h1 { border-bottom: calc(var(--border-thick) * 2) solid var(--border); padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
+h2 { border-bottom: calc(var(--border-thick) * 1.5) solid var(--border); padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
+h3 { border-bottom: var(--border-thick) solid var(--border); padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
+.code-block-wrap{position:relative;}
+.code-block{position:relative;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;}
+.code-block code,.cm-readonly-block{white-space:inherit;}
+.code-block.nowrap{white-space:pre;overflow-x:auto;}
+.code-copy-btn{position:absolute; top:.2rem; right:.2rem; z-index:5; background:var(--bg_panel); border:var(--border-thick) solid var(--border); color:var(--text_muted); border-radius:.3rem; padding:.1rem .3rem; cursor:pointer; font-size:.7rem;}
+.code-copy-btn:hover{color:var(--accent); border-color:var(--accent);}
+.code-wrap-btn{position:absolute; top:.2rem; right:1.8rem; z-index:5; background:var(--bg_panel); border:var(--border-thick) solid var(--border); color:var(--text_muted); border-radius:.3rem; padding:.1rem .3rem; cursor:pointer; font-size:.7rem;}
+input[type="checkbox"]:checked + span { text-decoration: line-through; opacity: 0.55; transition: opacity 0.2s; }
+
+.md-tabset { display: flex; flex-wrap: wrap; border: var(--border-thick) solid var(--border); border-radius: var(--radius); margin: 1rem 0; background: var(--bg_panel); }
+.md-tabset input[type="radio"] { display: none; }
+.md-tabset .md-tab-btn { order: 1; padding: 0.6rem 1.2rem; cursor: pointer; color: var(--text_muted); font-weight: 600; white-space: nowrap; transition: color 0.2s, border-color 0.2s; border-bottom: 2px solid transparent; user-select: none; }
+.md-tabset .md-tab-btn:hover { color: var(--text); }
+.md-tabset input[type="radio"]:checked + .md-tab-btn { color: var(--accent); border-bottom-color: var(--accent); background: var(--bg); }
+.md-tabset .md-tab-pane { order: 2; width: 100%; display: none; padding: 1rem; background: var(--bg); border-top: var(--border-thick) solid var(--border); }
+.md-tabset input[type="radio"]:checked + .md-tab-btn + .md-tab-pane { display: block; }
+"""
+
+CODE_MIRROR_THEME_CSS = """
+.CodeMirror{background:var(--bg);color:var(--text);font-family:var(--font-mono);}
+.CodeMirror-gutters{background:var(--bg_panel);border-right:var(--border-thick) solid var(--border);}
+.CodeMirror-cursor{border-left:var(--border-thick) solid var(--accent);}
+.CodeMirror-selected{background:var(--accent_dim);}
+.cm-s-default .cm-keyword{color:var(--accent);}
+.cm-s-default .cm-comment{color:var(--text_muted);font-style:italic;}
+.cm-s-default .cm-string{color:#7ecbca;}
+.cm-s-default .cm-number{color:#b5cea8;}
+.cm-s-default .cm-def,.cm-s-default .cm-variable-2{color:#9cdcfe;}
+"""
+
+MD_CODE_MIRROR_INIT_JS = """
+(function(){
+    function initBlocks(root){
+        (root||document).querySelectorAll('textarea.cm-readonly-block').forEach(function(ta){
+            if(ta.cm) return;
+            ta.cm = CodeMirror.fromTextArea(ta, {lineNumbers:true, readOnly:true, mode:ta.dataset.mode||'text', theme:'default'});
+        });
+    }
+    document.addEventListener('htmx:afterSwap', function(e){ initBlocks(e.detail.target); });
+    initBlocks();
+})();
+"""
+
+# --- Live-Preview Overlay (optional) ---
+# A CodeMirror overlay that visually styles markdown syntax in-place, without altering the underlying text.
+# Opt-in: after creating a CodeMirror instance over markdown content, call MD_LIVE.attach(cmInstance) in JS.
+# Pair with MD_LIVE_CSS (inject once via extra_css). Intentionally partial - bold/italic/heading/code/link only.
+
+MD_LIVE_EDIT_INIT_JS = """
+(function(){
+    // This script can be evaluated more than once per page (a module root re-rendered into the shell); listeners are bound once, later runs only rescan.
+    if (window.__mdLiveEdit) { window.__mdLiveEdit(); return; }
+    function initLiveEdit(){
+        document.querySelectorAll('.editor-shell[id]').forEach(function(shell){
+            var did = shell.id.slice('editor-shell-'.length);
+            var ta = shell.querySelector('#doc-textarea-'+did);
+            if (!ta || ta.cm) return;
+            var cm = CodeMirror.fromTextArea(ta, {lineNumbers:false, lineWrapping:!ta.classList.contains('unwrapped'), mode:'text/plain', theme:'default'});
+            ta.cm = cm;   // claimed before anything else can throw: a textarea is wrapped by exactly one editor
+            cm.getWrapperElement().classList.add('cm-live-edit');
+            MD_LIVE.attach(cm);
+            cm.on('change', function(){
+                if (ta.dataset.live !== '0') MD_LIVE.attach(cm);
+                ta.dataset.dirty = '1';
+                document.getElementById('editor-dirty-'+did).style.display = 'inline';
+            });
+            cm.on('blur', function(){
+                if (ta.dataset.dirty !== '1') return;
+                cm.save();
+                htmx.trigger(ta, 'blursave');
+                ta.dataset.dirty = '0';
+            });
+        });
+    }
+    window.__mdLiveEdit = initLiveEdit;
+    document.addEventListener('htmx:afterSettle', function(){ initLiveEdit(); });   // after settle the swapped-in shell is in the document (an outerHTML swap's event target is the old, detached element)
+    document.addEventListener('im:tab-flush', function(){
+        document.querySelectorAll('textarea[id^="doc-textarea-"]').forEach(function(ta){
+            if (ta.cm && ta.dataset.dirty === '1') { ta.cm.save(); htmx.trigger(ta, 'blursave'); ta.dataset.dirty = '0'; }
+        });
+    });
+})();
+"""
+
+MD_LIVE_OVERLAY_JS = r"""
+window.MD_LIVE = window.MD_LIVE || (() => {
+    // Styles markdown in place without changing the text: markers (** * ` # ```) stay visible and dimmed, the text between them shows bold / italic / code / heading.
+    // Token names become CodeMirror classes with a cm- prefix (md-strong -> .cm-md-strong in MD_LIVE_CSS). Inline spans and headings end with their line; code fences span lines.
+    const SPANS = [['**', 'md-strong'], ['__', 'md-strong'], ['*', 'md-em'], ['_', 'md-em'], ['`', 'md-code']];
+    function closes(stream, m) { const rest = stream.string.slice(stream.pos + m.length); return rest.length > 0 && rest[0] !== ' ' && rest.indexOf(m) > 0; }   // opens only when a closing marker follows on the same line, after at least one character
+    function wordEdge(stream) { return stream.pos === 0 || /\W/.test(stream.string[stream.pos - 1]); }   // _ and __ open only at a word edge, so snake_case stays plain
+    function overlay() {
+        return {
+            startState: function() { return { fence: false, close: '', cls: '', head: '' }; },
+            token: function(stream, st) {
+                if (stream.sol()) { st.close = ''; st.cls = ''; st.head = ''; }
+                if (stream.sol() && stream.match('```')) { stream.skipToEnd(); st.fence = !st.fence; return 'md-marker md-code'; }
+                if (st.fence) { stream.skipToEnd(); return 'md-code'; }
+                if (stream.sol() && stream.match(/^#{1,6}(?=\s)/)) { st.head = ' md-heading md-h' + stream.current().length; return 'md-marker' + st.head; }
+                if (st.close) {
+                    if (stream.match(st.close)) { st.close = ''; st.cls = ''; return 'md-marker' + st.head; }
+                    while (!stream.eol() && !stream.match(st.close, false)) stream.next();   // always advances: the closing marker did not match at the start
+                    return st.cls + st.head;
+                }
+                for (const [m, cls] of SPANS) {
+                    if (stream.match(m, false) && (m[0] !== '_' || wordEdge(stream)) && closes(stream, m)) { stream.match(m); st.close = m; st.cls = cls; return 'md-marker' + st.head; }
+                }
+                if (stream.match(/^\[[^\]]+\]\([^)]*\)/)) return 'md-link' + st.head;
+                stream.next();
+                return st.head ? st.head.trim() : null;
+            }
+        };
+    }
+    function define() { if (!CodeMirror.modes['md-live']) CodeMirror.defineMode('md-live', function(config, spec) { return CodeMirror.overlayMode(CodeMirror.getMode(config, spec.backdrop || 'text/plain'), overlay()); }); }   // the mode option takes a spec (a name), not a mode object, so the overlay is registered as a named mode; defined on first attach, so pages without CodeMirror never touch it
+    const _base = new WeakMap();   // the mode an editor had before attach, restored by detach
+    function attach(cm) { if (_base.has(cm)) return; define(); const m = cm.getOption('mode') || 'text/plain'; _base.set(cm, m); cm.setOption('mode', {name: 'md-live', backdrop: m}); }
+    function detach(cm) { if (!_base.has(cm)) return; cm.setOption('mode', _base.get(cm)); _base.delete(cm); }
+    return { attach, detach };
+})();
+"""
+
+MD_LIVE_CSS = """
+.cm-md-marker{opacity:.4;}
+.cm-md-heading{font-weight:700;}
+.cm-md-hr{opacity:.5; letter-spacing:.2em;}
+.cm-md-h1{font-size:1.7em;}
+.cm-md-h2{font-size:1.4em;}
+.cm-md-h3{font-size:1.2em;}
+.cm-md-h4{font-size:1.1em;}
+.cm-md-h5{font-size:1.02em;}
+.cm-md-h6{font-size:1em;opacity:.85;}
+.cm-md-strong{font-weight:700;}
+.cm-md-em{font-style:italic;}
+.cm-md-code{font-family:var(--font-mono); background:var(--surface); border-radius:.2rem;padding:0 .15rem;}
+.cm-md-link{color:var(--accent); text-decoration:underline;}
+"""
+
+MD_LIVE_EDIT_CSS = """
+.editor-main-container .cm-live-edit.CodeMirror { font-family: var(--font-main) !important; font-size: calc(var(--font-size, 1rem) * var(--editor-zoom, 1)) !important; flex: 1; width: 100%; height: 100% !important; }
+.cm-live-edit .CodeMirror-line, .cm-live-edit .CodeMirror-lines { font-family: var(--font-main) !important; }
+.cm-live-edit .CodeMirror-scroll { min-height: 100%; }
+"""
+
+# Math: the transpiler marks it (.md-math); static/js/md_math.js, loaded by base.html on every page, typesets it with KaTeX (static/js/katex).
+def _render_list_blocks(text: str, task_interactive: bool, task_counter: list) -> str:
+    """Indentation-stack nested list renderer. Handles bullet (-,*,+), numbered (N.), and task ([ ]/[x]) items, nested by RELATIVE indent (not a fixed step size). task_counter is a shared [int] mutated in document-line order so _flip_task's own line-walk stays index-consistent regardless of nesting."""
+    lines = text.split("\n")
+    item_re = re.compile(r'^(\s*)(?:([-*+])|(\d+)\.)\s+(?:\[([ xX])\]\s+)?(.*)$')
+    out, i = [], 0
+    while i < len(lines):
+        if not item_re.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        stack, block = [], []
+        while i < len(lines):
+            m = item_re.match(lines[i])
+            if not m: break
+            indent, num, task, content = len(m.group(1)), m.group(3), m.group(4), m.group(5)
+            tag = "ol" if num else "ul"
+            start = f" start={num}" if num else ""
+            while stack and indent < stack[-1][0]: block.append(f"</{stack.pop()[1]}>")
+            if not stack or indent > stack[-1][0]:
+                stack.append((indent, tag)); block.append(f"""<{tag}{start} style="padding-left:1.5rem; margin:.4rem 0;">""")
+            elif stack[-1][1] != tag:
+                block.append(f"</{stack[-1][1]}>"); stack[-1] = (indent, tag); block.append(f"""<{tag}{start} style="padding-left:1.5rem; margin:.4rem 0;">""")
+            if task is not None:
+                checked = task.lower() == 'x'; idx = task_counter[0]; task_counter[0] += 1
+                cls = ' class="md-task-done"' if checked else ""
+                attrs = f"""data-task-idx="{idx}" onclick="this.dispatchEvent(new CustomEvent('md-task-toggle',{{bubbles:true,detail:{{idx:{idx}}}}}))" style='margin-right:.4rem;cursor:pointer;'""" if task_interactive else 'disabled style="margin-right:.4rem;"'
+                del_btn = f"""<span onclick="event.stopPropagation();this.dispatchEvent(new CustomEvent('md-task-delete',{{bubbles:true,detail:{{idx:{idx}}}}}))" style="margin-left:.4rem;opacity:.4;cursor:pointer;font-size:.8em" title="Delete item">&#x2715;</span>""" if task_interactive else ""
+                block.append(f'<li style="list-style:none;"><input type="checkbox" {"checked " if checked else ""}{attrs}><span{cls}>{content}</span>{del_btn}</li>')
+            else:
+                block.append(f'<li>{content}</li>')
+            i += 1
+        while stack: block.append(f"</{stack.pop()[1]}>")
+        out.append("\n".join(block))
+    return "\n".join(out)
+
+def render_graphviz_block(dot_src: str, theme: dict = None) -> str:
+    """Renders one DOT source string to a theme-tinted, size-constrained inline SVG. Falls back to showing the raw source as a code block on any failure (graphviz not installed, invalid DOT) rather than vanishing silently. This is the single place graphviz rendering happens - call it from anywhere markdown is processed (it's wired into md_plus_transpiler below); nothing document-editor-specific about it."""
+    try:
+        import graphviz
+        text_color, muted_color = (theme or {}).get("text", "#ced4da"), (theme or {}).get("text_muted", "#6c757d")
+        inject = f'graph [bgcolor="transparent" fontcolor="{text_color}"]; node [fontcolor="{text_color}" color="{muted_color}"]; edge [color="{muted_color}" fontcolor="{muted_color}"]; '
+        injected = re.sub(r'(di)?graph(\s+\w*)?\s*\{', lambda m: f"{m.group(0)}{inject}", dot_src, count=1)
+        svg = graphviz.Source(injected).pipe(format="svg").decode("utf-8")
+        # HTML-escape the DOT source for safe display in a hidden textarea
+        escaped_dot = UI.escape(dot_src)
+        return f'''<div class="graphviz-wrapper">
+<div style="position:relative;">
+{svg}
+<textarea class="graphviz-dot-source" aria-hidden="true">{escaped_dot}</textarea>
+<button type="button" class="graphviz-copy-btn" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('svg').outerHTML)" title="Copy the picture as SVG">SVG</button>
+<button type="button" class="graphviz-copy-dot" onclick="navigator.clipboard.writeText(this.closest('.graphviz-wrapper').querySelector('.graphviz-dot-source').value)" title="Copy the DOT source">DOT</button>
+</div>
+</div>'''
+    except Exception:
+        return f'<pre class="code-block"><code class="lang-dot">{UI.escape(dot_src)}</code></pre>'
+
+def md_plus_transpiler(text: str, mode: str = "extended", fix_mojibake: bool = True, code_mirror: bool = False, task_interactive: bool = False, loose_breaks: bool = True, doc_id: str = "", enable_graphviz: bool = True, enable_latex: bool = True, theme: dict = None, **kwargs) -> str:
+    """
+    mode: "standard" | "extended" (default) | "portal"
+    loose_breaks (default True): every newline is its own paragraph break.
+    code_mirror / task_interactive / enable_graphviz / theme: see PortalEditor for usage.
+    enable_latex: protects $...$ / $$...$$ from other passes and leaves them as literal text for a client-side KaTeX auto-render pass to pick up (no server-side LaTeX rendering - see notes).
+    Code, graphviz, ::: details, LaTeX, and backslash-escapes are all stashed before any other pass and restored last - none of them can be reinterpreted or corrupted by paragraph-splitting/loose_breaks.
+    """
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if fix_mojibake: text = clean_text(text)
+
+    _code_blocks: list[str] = []
+    def _stash_block(html_str): _code_blocks.append(html_str); return f"\x00CODE{len(_code_blocks)-1}\x00"
+
+    _DETAILS_OPEN  = re.compile(r'^:::details[ \t]*(.*)$')
+    _DETAILS_CLOSE = re.compile(r'^:::[ \t]*$')
+
+    def _extract_details(lines: list) -> list:
+        """Line-scan stack for nested :::details ... ::: blocks. Each closed block is
+        recursively transpiled and stashed; an unclosed block is left visible verbatim."""
+        out, stack = [], []
+        for line in lines:
+            om, cm_ = _DETAILS_OPEN.match(line), _DETAILS_CLOSE.match(line)
+            if om and not cm_:
+                stack.append({"title": om.group(1).strip() or "Details", "body": []})
+                continue
+            if cm_ and stack:
+                block = stack.pop()
+                rendered = md_plus_transpiler("\n".join(block["body"]), mode=mode, fix_mojibake=False, code_mirror=code_mirror, loose_breaks=loose_breaks, enable_graphviz=enable_graphviz, enable_latex=enable_latex, theme=theme, **kwargs)
+                token = _stash_block(f'<details class="md-details"><summary>{UI.escape(block["title"])}</summary><div class="md-details-body">{rendered}</div></details>')
+                (stack[-1]["body"] if stack else out).append(token)
+                continue
+            (stack[-1]["body"] if stack else out).append(line)
+        for leftover in stack: out.extend([f":::details {leftover['title']}"] + leftover["body"])
+        return out
+
+    text = "\n".join(_extract_details(text.split("\n")))
+
+    # --- Server-side Tabset Compiler (Zero JS) ---
+    # A {.tabset} header opens a tab group. It closes at: an explicit {end.tabset} marker line, the next header whose level is <= its own, or end of document.
+    # Processed deepest level first so a nested tabset's marker becomes an opaque stashed token before the enclosing (shallower) level's boundary search runs.
+    tabset_counter = [0]
+    doc_prefix = doc_id if doc_id else "static"
+    _tabset_end_re = re.compile(r'^\{end\.tabset\}[ \t]*\n?', re.M)
+    for level in range(5, 0, -1):
+        hashes = '#' * level
+        marker_re = re.compile(rf'^{hashes}[ \t]+(.*?)[ \t]+\{{\.tabset\}}[ \t]*$\n?', re.M)
+        boundary_re = re.compile(rf'^(?:#{{1,{level}}}[ \t]|\{{end\.tabset\}}[ \t]*$)', re.M)
+        out, pos = [], 0
+        for m in marker_re.finditer(text):
+            if m.start() < pos: continue
+            out.append(text[pos:m.start()])
+            body_start = m.end()
+            b = boundary_re.search(text, body_start)
+            body_end = b.start() if b else len(text)
+            inner_content = text[body_start:body_end]
+            child_hashes = '#' * (level + 1)
+            parts = re.split(rf'^{child_hashes}[ \t]+(.+)$', inner_content, flags=re.M)
+            if len(parts) < 3:
+                out.append(f"{hashes} {m.group(1).strip()}\n")
+                out.append(inner_content)
+                pos = b.end() if (b and _tabset_end_re.match(text, b.start())) else body_end
+                continue
+            t_idx = tabset_counter[0]; tabset_counter[0] += 1
+            html_parts = ['<div class="md-tabset">']
+            for child_idx, i in enumerate(range(1, len(parts), 2)):
+                title_str, body_str = parts[i].strip(), parts[i+1]
+                rendered_body = md_plus_transpiler(body_str, mode=mode, fix_mojibake=False, code_mirror=code_mirror, loose_breaks=loose_breaks, enable_graphviz=enable_graphviz, enable_latex=enable_latex, theme=theme, **kwargs)
+                tab_id, group_name = f"tab-{doc_prefix}-{t_idx}-{child_idx}", f"tabset-{doc_prefix}-{t_idx}"
+                clean_title = re.sub(r'\{[#\.][\w-]+\}', '', title_str).strip()
+                html_parts.append(f'<input type="radio" id="{tab_id}" name="{group_name}"{" checked" if child_idx == 0 else ""}>')
+                html_parts.append(f'<label class="md-tab-btn" for="{tab_id}">{clean_title}</label>')
+                html_parts.append(f'<div class="md-tab-pane">{rendered_body}</div>')
+            html_parts.append('</div>')
+            out.append(_stash_block("\n".join(html_parts)))
+            pos = b.end() if (b and _tabset_end_re.match(text, b.start())) else body_end
+        out.append(text[pos:])
+        text = "".join(out)
+
+    if enable_graphviz: text = re.sub(r'```dot\n(.*?)\n```', lambda m: _stash_block(render_graphviz_block(m.group(1), theme)), text, flags=re.S)
+
+    def _stash_fenced(m):
+        lang, code = m.group(1).strip(), m.group(2)
+        copy_btn = """<button type="button" class="code-copy-btn" onclick="navigator.clipboard.writeText(this.closest('.code-block,.code-block-wrap').querySelector('code,textarea').textContent||this.closest('.code-block,.code-block-wrap').querySelector('code,textarea').value||'')" title="Copy code">&#x2398;</button>"""
+        wrap_btn = """<button type="button" class="code-wrap-btn" onclick="this.closest('.code-block').classList.toggle('nowrap')" title="Toggle word wrap">&#x21AA;</button>"""
+        if code_mirror and lang:
+            block = f'<div class="code-block-wrap">{copy_btn}<textarea class="cm-readonly-block" data-mode="{lang}" readonly>{UI.escape(code)}</textarea></div>'
+        else:
+            label = f'<span style="font-size:.65rem;color:var(--text_muted);padding:.2rem .5rem;">{lang}</span>' if lang else ""
+            block = f'<pre class="code-block">{copy_btn}{wrap_btn}{label}<code class="lang-{lang}">{UI.escape(code)}</code></pre>'
+        return _stash_block(block)
+    if enable_latex: text = re.sub(r'```(?:math|latex|tex)\n(.*?)```', lambda m: _stash_block(f"""<div class="md-math" data-display="1">{UI.escape(m.group(1).strip())}</div>"""), text, flags=re.S)
+    text = re.sub(r'```(\w*)\n(.*?)```', _stash_fenced, text, flags=re.S)
+
+    def _stash_inline(m): return _stash_block(f'<code class="inline-code">{UI.escape(m.group(1))}</code>')
+    text = re.sub(r'`([^`\n]+)`', _stash_inline, text)
+
+    _latex_blocks: list[str] = []
+    def _stash_latex(m, display):
+        _latex_blocks.append(f"""<span class="md-math" data-display="{int(display)}"{' style="display:block"' if display else ""}>{UI.escape(m.group(1).strip())}</span>""")   # a span either way - display math often sits inside a paragraph
+        return f"\x00LATEX{len(_latex_blocks)-1}\x00"
+    if enable_latex:   # $$..$$ and \[..\] display, \(..\) and $..$ inline; a $ followed by a space or a closing $ followed by a digit is money, not math ($5 and $10)
+        text = re.sub(r'\$\$(.+?)\$\$', lambda m: _stash_latex(m, True), text, flags=re.S)
+        text = re.sub(r'\\\[(.+?)\\\]', lambda m: _stash_latex(m, True), text, flags=re.S)
+        text = re.sub(r'\\\((.+?)\\\)', lambda m: _stash_latex(m, False), text, flags=re.S)
+        text = re.sub(r'(?<![\$\w])\$(?=\S)([^\$\n]+?)(?<=\S)\$(?![\$\w])', lambda m: _stash_latex(m, False), text)
+
+    _escapes: list[str] = []
+    def _stash_escape(m):
+        _escapes.append(UI.escape(m.group(1)))
+        return f"\x00ESC{len(_escapes)-1}\x00"
+    text = re.sub(r'\\([\\`*_{}\[\]()#+\-.!~^=|])', _stash_escape, text)
+
+    _decorators: list[tuple[str, list[str]]] = []
+    def _stash_decorator(m):
+        _decorators.append((m.group(1), [c.lstrip(".") for c in m.group(2).split()]))
+        return f"\x00DECOR{len(_decorators)-1}\x00"
+    text = re.sub(r'<!--\s*\{([a-zA-Z][\w-]*)\s*:\s*((?:\.[\w-]+\s*)+)\}\s*-->', _stash_decorator, text)
+
+    if kwargs.get("post_escape_fn"): text = kwargs.get("post_escape_fn")(text)
+
+    _html_tags: list[str] = []
+    if mode == "standard":
+        text = UI.escape(text)
+    else:
+        def _stash_html(m):
+            _html_tags.append(m.group(0))
+            return f"\x00HTML{len(_html_tags)-1}\x00"
+        text = re.sub(r'<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>.*?</\1>', _stash_html, text, flags=re.S)
+        text = re.sub(r'<[a-zA-Z][^>]*/?>', _stash_html, text)
+        text = re.sub(r'</[a-zA-Z]+>', _stash_html, text)
+        def _escape_non_stash(segment): return UI.escape(segment) if not segment.startswith('\x00HTML') else segment
+        parts = re.split(r'(\x00HTML\d+\x00)', text)
+        text  = "".join(_escape_non_stash(p) for p in parts)
+
+    if mode in ("extended", "portal"):
+        def _apply_style_group(m): return f"""style='{STYLE_GROUPS.get(m.group(1), "")}'"""
+        text = re.sub(r'\(\(@(.*?)\)\)', _apply_style_group, text)
+        text = re.sub(r'\(\(glass\)\)', '<div class="glass" style="padding:1.5rem; margin-bottom:1rem;">', text)
+        text = re.sub(r'\(\(row\)\)', '<div style="display:flex; gap:1rem; flex-wrap:wrap; align-items:center;">', text)
+        text = re.sub(r'\(\(col\)\)', '<div style="display:flex; flex-direction:column; gap:0.5rem;">', text)
+        text = re.sub(r'\(\(grid:\s*(\d+)\)\)', r'<div style="display:grid; grid-template-columns:repeat(\1,1fr); gap:1rem;">', text)
+        text = re.sub(r'\(\(\)\)', '</div>', text)
+
+    for n in range(6, 0, -1):
+        hashes = '#' * n
+        text = re.sub(rf'^{hashes}\s+(.+)$', rf'<h{n}>\1</h{n}>', text, flags=re.M)
+
+    def _blockquote_run(m):
+        inner = re.sub(r'^&gt;\s?', '', m.group(0), flags=re.M)
+        return f'<blockquote style="border-left:.3rem solid var(--accent); padding:.3rem .8rem; margin:.5rem 0; color:var(--text_muted);">{inner}</blockquote>'
+    text = re.sub(r'(?:^&gt;.*$\n?)+', _blockquote_run, text, flags=re.M)
+    text = re.sub(r'^(?:---|\*\*\*|___)\s*$', r'<hr style="border:0; border-top:0.15rem solid var(--text_muted); opacity:.6; margin:1rem 0;">', text, flags=re.M)
+
+    def _gfm_table(m):
+        raw = m.group(0).strip()
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        if len(lines) < 2: return raw
+        headers = [c.strip() for c in lines[0].strip('|').split('|')]
+        rows = [[c.strip() for c in line.strip('|').split('|')] for line in lines[2:]]
+        th = "".join(f'<th style="padding:.32rem .6rem; border-bottom:var(--border-thick) solid var(--border); text-align:left;">{h}</th>' for h in headers)
+        tbody = "".join(f"""<tr>{"".join(f'<td style="padding:.28rem .6rem; border-bottom:var(--border-thick) solid var(--border);">{c}</td>' for c in row)}</tr>""" for row in rows)
+        return f'<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:.85rem;"><thead><tr>{th}</tr></thead><tbody>{tbody}</tbody></table></div>'
+    text = re.sub(r'(?:^\|.+\|.*$\n?){2,}', _gfm_table, text, flags=re.M)
+
+    footnotes: dict[str, str] = {}
+    def _collect_footnote(m):
+        footnotes[m.group(1)] = m.group(2).strip()
+        return ""
+    text = re.sub(r'^\[\^([\w-]+)\]:\s*(.+)$', _collect_footnote, text, flags=re.M)
+    fn_counter = [0]
+    def _footnote_ref(m):
+        key = m.group(1); fn_counter[0] += 1
+        return f'<sup><a id="fnref-{key}" href="#fn-{key}" title="{UI.escape(footnotes.get(key, key))}" style="color:var(--accent);">[{fn_counter[0]}]</a></sup>'
+    text = re.sub(r'\[\^([\w-]+)\]', _footnote_ref, text)
+    text = re.sub(r'^([^\n:][^\n]*)\n:\s+(.+)$', r'<dl><dt style="font-weight:600;">\1</dt><dd style="margin-left:1.5rem;color:var(--text_muted);">\2</dd></dl>', text, flags=re.M)
+
+    _task_idx = [0]
+    text = _render_list_blocks(text, task_interactive, _task_idx)
+    text = re.sub(r'\*\*\*(.*?)\*\*\*', r'<strong><em>\1</em></strong>', text)
+    text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
+    text = re.sub(r'__(.*?)__', r'<strong>\1</strong>', text)
+    text = re.sub(r'\*([^\*\n]+?)\*', r'<em>\1</em>', text)
+    text = re.sub(r'_([^_\n]+?)_', r'<em>\1</em>', text)
+    text = re.sub(r'~~(.*?)~~', r'<del>\1</del>', text)
+    text = re.sub(r'==(.*?)==', r'<mark style="background:var(--accent_dim);color:var(--accent);padding:0 .15rem;border-radius:0.2rem;">\1</mark>', text)
+    text = re.sub(r'\{color\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})(?:,\s*([\d.]+))?\)\}(.*?)\{\\color\}', lambda m: f'<span style="color:rgba({m.group(1)},{m.group(2)},{m.group(3)},{m.group(4) or "1"})">{m.group(5)}</span>', text)
+    text = re.sub(r'\^([^\^\n]+?)\^', r'<sup>\1</sup>', text)
+    text = re.sub(r'(?<!~)~([^~\n]+?)~(?!~)', r'<sub>\1</sub>', text)
+    text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<img src="\2" alt="\1" style="max-width:100%;border-radius:var(--radius);">', text)
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" style="color:var(--accent);">\1</a>', text)
+
+    def _emoji(m): return _EMOJI.get(m.group(1), m.group(0))
+    text = re.sub(r':([a-z0-9_]+):', _emoji, text)
+    text = text.replace(':check:', '&#9989;').replace(':warn:', '&#9888;')
+
+    if mode == "portal":
+        text = re.sub(r'\[\[Pick:\s*(.*?)\s*\|\s*(.*?)\]\]', lambda m: UI.dropdown(m.group(1), m.group(2)), text)
+        text = re.sub(r'\[\[Input:\s*(.*?)\s*\|\s*(.*?)\]\]', lambda m: UI.text_input(m.group(1), m.group(2)), text)
+        def _btn(m):
+            p = [x.strip() for x in m.group(1).split('|')]
+            return UI.button(p[0], p[1] if len(p)>1 else "#", p[2] if len(p)>2 else "#content")
+        text = re.sub(r'\[\[Action:\s*(.*?)\]\]', _btn, text)
+        text = re.sub(r'\[\[Plot:\s*(.*?)\s*\|\s*(.*?)\]\]', lambda m: UI.plot(m.group(1), m.group(2)), text)
+        text = re.sub(r'\[\[Chat:\s*(.*?)\]\]', lambda m: f"""<div id="chat-window" hx-get="/api/chat/{m.group(1)}" hx-trigger="every 2s" class="glass" style="height:40rem;overflow-y:auto;padding:1rem;display:flex;flex-direction:column-reverse;gap:.5rem;">Loading...</div>""", text)
+
+    _BLOCK_TAGS = re.compile(r'^<(?:h[1-6]|ul|ol|li|dl|dt|dd|table|blockquote|pre|hr|div|p)', re.I)
+    _CODE_TOKEN = re.compile(r'^\x00CODE\d+\x00$')
+    sep_pattern = r'\n+' if loose_breaks else r'\n{2,}'
+    paragraphs = re.split(sep_pattern, text)
+    out_parts  = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para: continue
+        if _BLOCK_TAGS.match(para) or para.startswith('\x00HTML') or _CODE_TOKEN.match(para):
+            out_parts.append(para)
+        else:
+            inner = para if loose_breaks else para.replace('\n', '<br>\n')
+            out_parts.append(f'<p style="margin:.4rem 0;">{inner}</p>')
+    text = "\n".join(out_parts)
+
+    if footnotes:
+        items = "".join(f'<li id="fn-{k}" style="font-size:.8rem;color:var(--text_muted);">{v} <a href="#fnref-{k}" style="color:var(--accent);">&#x21A9;</a></li>' for k, v in footnotes.items())
+        text += f'<hr style="margin-top:1.5rem;border-color:var(--border);"><ol style="padding-left:1.5rem;">{items}</ol>'
+
+    if mode != "standard":
+        for i, tag in enumerate(_html_tags): text = text.replace(f'\x00HTML{i}\x00', tag)
+    for i, block in enumerate(_code_blocks): text = text.replace(f'\x00CODE{i}\x00', block)
+    for i, lx in enumerate(_latex_blocks): text = text.replace(f'\x00LATEX{i}\x00', lx)
+    for i, esc in enumerate(_escapes): text = text.replace(f'\x00ESC{i}\x00', esc)
+
+    for idx, (tag, classes) in enumerate(_decorators):
+        token = f"\x00DECOR{idx}\x00"
+        tpos = text.find(token)
+        if tpos == -1: continue
+        open_re = re.compile(rf'(<{tag}\b)([^>]*)(>)')
+        last_match = None
+        for om in open_re.finditer(text, 0, tpos): last_match = om
+        if last_match:
+            cls_str = " ".join(classes)
+            attrs = last_match.group(2)
+            attrs = re.sub(r'class="([^"]*)"', lambda cm: f'class="{cm.group(1)} {cls_str}"', attrs, count=1) if 'class="' in attrs else f' class="{cls_str}"' + attrs
+            text = text[:last_match.start()] + last_match.group(1) + attrs + last_match.group(3) + text[last_match.end():]
+            tpos = text.find(token)
+        text = text[:tpos] + text[tpos+len(token):]
+    text = re.sub(r'<p[^>]*>\s*</p>', '', text)  # cleans up the now-empty paragraph the comment line wrapped into
+
+    return text
+
+# --- HTML - Markdown reverse transpiler ---
+# Converts HTML (produced by md_plus_transpiler or compatible markup) back to Markdown text. Same three modes mirror the forward transpiler.
+#   "standard"  - emit standard Markdown only
+#   "extended"  - (default) emit KCC layout macros where recognised
+#   "portal"    - extended + emit portal widget macros where recognised
+# Not a full HTML parser - uses regex on well-formed, KCC-generated HTML.
+# Complex/nested structures are left as raw HTML if they can't be cleanly reversed.
+
+def html_to_md(html: str, mode: str = "extended", **kwargs) -> str:
+    """
+    Convert HTML back to Markdown + optional KCC extensions.
+    mode: "standard" | "extended" (default) | "portal"
+    """
+    t = html
+
+    # --- Block elements ---
+
+    # Headings - with optional id attribute
+    for n in range(6, 0, -1): t = re.sub(rf'<h{n}(?:\s+id="([\w-]+)")?[^>]*>(.*?)</h{n}>', lambda m, _n=n: f'{"#"*_n} {m.group(2)}' + (f' {{#{m.group(1)}}}' if m.group(1) else ''), t, flags=re.S | re.I)
+
+    t = re.sub(r'<blockquote[^>]*>(.*?)</blockquote>', lambda m: "\n".join(f"> {line}" for line in m.group(1).splitlines()), t, flags=re.S | re.I) # Blockquote
+    t = re.sub(r'<hr[^>]*/?>',  '---', t, flags=re.I) # Horizontal rule
+
+    # Fenced code blocks
+    t = re.sub(r'<pre[^>]*>(?:<span[^>]*>[^<]*</span>)?<code(?:\s+class="lang-(\w+)")?[^>]*>(.*?)</code></pre>', lambda m: f'```{m.group(1) or ""}\n{m.group(2)}\n```', t, flags=re.S | re.I)
+    t = re.sub(r'<code[^>]*>(.*?)</code>', r'`\1`', t, flags=re.S | re.I) # Inline code
+
+    # Tables
+    def _table_to_md(m):
+        raw = m.group(0)
+        ths = re.findall(r'<th[^>]*>(.*?)</th>', raw, re.S | re.I)
+        rows = re.findall(r'<tr>(.*?)</tr>', raw, re.S | re.I)
+        if not ths: return raw
+        header = '| ' + ' | '.join(ths) + ' |'
+        sep = '| ' + ' | '.join(['---'] * len(ths)) + ' |'
+        body_rows = []
+        for row in rows[1:]:  # skip header row
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.S | re.I)
+            if cells: body_rows.append('| ' + ' | '.join(cells) + ' |')
+        return '\n'.join([header, sep] + body_rows)
+    t = re.sub(r'<table[^>]*>.*?</table>', _table_to_md, t, flags=re.S | re.I)
+
+    # Lists
+    t = re.sub(r'<li[^>]*><input[^>]+checked[^>]*/>(.*?)</li>', r'- [x] \1', t, flags=re.S | re.I)
+    t = re.sub(r'<li[^>]*><input[^>]+/>(.*?)</li>', r'- [ ] \1', t, flags=re.S | re.I)
+    t = re.sub(r'<ul[^>]*>(.*?)</ul>', lambda m: m.group(1), t, flags=re.S | re.I)
+    t = re.sub(r'<ol[^>]*>(.*?)</ol>', lambda m: m.group(1), t, flags=re.S | re.I)
+    t = re.sub(r'<li[^>]*>(.*?)</li>', r'- \1', t, flags=re.S | re.I)
+    t = re.sub(r'<dl[^>]*>.*?<dt[^>]*>(.*?)</dt>.*?<dd[^>]*>(.*?)</dd>.*?</dl>', r'\1\n: \2', t, flags=re.S | re.I) # Definition list
+
+    # Blockquotes (second pass for nested content - add a recursive to solve nested content)
+    t = re.sub(r'<blockquote[^>]*>(.*?)</blockquote>', lambda m: "\n".join(f"> {l}" for l in m.group(1).strip().splitlines()), t, flags=re.S | re.I)
+
+    t = re.sub(r'<p[^>]*>(.*?)</p>', r'\1\n', t, flags=re.S | re.I) # Paragraphs - blank-line separated text
+    t = re.sub(r'<br\s*/?>', '\n', t, flags=re.I) # <br>
+
+    # --- Inline elements ---
+    t = re.sub(r'<strong><em>(.*?)</em></strong>', r'***\1***', t, flags=re.S | re.I)
+    t = re.sub(r'<strong>(.*?)</strong>', r'**\1**', t, flags=re.S | re.I)
+    t = re.sub(r'<em>(.*?)</em>', r'*\1*', t, flags=re.S | re.I)
+    t = re.sub(r'<del>(.*?)</del>', r'~~\1~~', t, flags=re.S | re.I)
+    t = re.sub(r'<mark[^>]*>(.*?)</mark>',r'==\1==', t, flags=re.S | re.I)
+    t = re.sub(r'<sup>(.*?)</sup>', r'^\1^', t, flags=re.S | re.I)
+    t = re.sub(r'<sub>(.*?)</sub>', r'~\1~', t, flags=re.S | re.I)
+    t = re.sub(r'<img[^>]+src="([^"]+)"[^>]+alt="([^"]*)"[^>]*/?>', r'![\2](\1)', t, flags=re.I) # Images before links
+    t = re.sub(r'<a(?:\s+id="[^"]*")?\s+href="([^"]+)"[^>]*>(.*?)</a>', r'[\2](\1)', t, flags=re.S | re.I) # Links (skip footnote anchors)
+    t = re.sub(r'<sup><a[^>]+href="#fn-([\w-]+)"[^>]*>\[\d+\]</a></sup>', r'[^\1]', t, flags=re.I) # Footnote superscripts  <sup><a _>[n]</a></sup>
+
+    # --- KCC Extended: Layout macros ---
+    if mode in ("extended", "portal"):
+        t = re.sub(r'<div class="glass"[^>]*>', '((glass))', t, flags=re.I)
+        t = re.sub(r'<div style="display:flex[^"]*gap[^"]*flex-wrap[^"]*">', '((row))', t, flags=re.I)
+        t = re.sub(r'<div style="display:flex[^"]*flex-direction:column[^"]*">', '((col))', t, flags=re.I)
+        t = re.sub(r'<div style="display:grid[^"]*repeat\((\d+)[^"]*">', r'((grid: \1))', t, flags=re.I)
+        t = re.sub(r'</div>\s*(?=\(\(|\[\[|#|\*|$)', '(())\n', t, flags=re.M) # closing </div> - only obvious layout ones; leave others as raw HTML
+
+    # --- Portal widget macros ---
+    if mode == "portal":
+        t = re.sub(r'<select[^>]+name="([^"]+)"[^>]*>(.*?)</select>', lambda m: f'[[Pick: {m.group(1)} | ' + ', '.join(re.findall(r'<option[^>]*>([^<]+)</option>', m.group(2))) + ']]', t, flags=re.S | re.I)
+        t = re.sub(r'<input[^>]+type="(?:text|number)"[^>]+name="([^"]+)"[^>]+placeholder="([^"]*)"[^>]*/?>', r'[[Input: \1 | \2]]', t, flags=re.I)
+        t = re.sub(r'<button[^>]+hx-get="([^"]+)"[^>]+hx-target="([^"]+)"[^>]*>(.*?)</button>', r'[[Action: \3 | \1 | \2]]', t, flags=re.S | re.I)
+
+    # --- Clean up residual HTML tags ---
+    # Strip any remaining recognised wrapper tags; leave unknown ones as-is
+    _STRIP_TAGS = re.compile(r'</?(?:div|span|section|article|header|footer|main|nav|aside|figure|figcaption)(?:\s[^>]*)?>', re.I)
+    t = _STRIP_TAGS.sub('', t)
+    t = (t.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")) # Unescape HTML entities that were in text content
+    t = re.sub(r'\n{3,}', '\n\n', t) # Collapse excessive blank lines
+
+    return t.strip()
+
+def extract_file_text(path: Path, max_excel_rows: int = 500) -> str:
+    """Best-effort plain-text extraction for common document formats - shared by any caller that needs a file turned into LLM-readable text (chat attachments, knowledge ingestion, etc.).
+    Images are not handled here; they go to vision-capable models as image data, not text. Returns an inline bracketed note on failure rather than raising, so a caller processing several files doesn't lose the rest to one bad file."""
+    ext = path.suffix.lower()
+    try:
+        if ext in (".txt", ".md", ".csv"): return path.read_text(encoding="utf-8", errors="ignore")
+        if ext in (".xlsx", ".xls"):
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            rows = []
+            for ws in wb.worksheets:
+                rows.append(f"Sheet: {ws.title}")
+                for row in ws.iter_rows(values_only=True, max_row=max_excel_rows): rows.append(",".join(str(c or "") for c in row))
+            return "\n".join(rows)
+        if ext == ".pdf":
+            reader = pypdf.PdfReader(str(path))
+            return "\n\n".join(pg.extract_text() or "" for pg in reader.pages)
+    except Exception as e: return f"[extraction error: {e}]"
+    return ""
+
+# --- Toolbar Toggle ---
+
+async def _intent_toggle_toolbar(request, payload, imr):
+    bar_id = payload.get("id", "")
+    if not bar_id: return imr
+    toolbar_states = await get_state(request, scope="session", namespace="_toolbars") or {}
+    new_open = not toolbar_states.get(bar_id, False)
+    toolbar_states[bar_id] = new_open
+    await set_state(request, toolbar_states, scope="session", namespace="_toolbars")
+    imr.trigger("toolbarToggle", {"id": bar_id, "side": payload.get("side", "left"), "size": payload.get("size", "18rem"), "mode": payload.get("mode", "shrink"), "open": new_open, "level": int(payload.get("level", 1)), "arrowOpen": payload.get("arrow_open", ""), "arrowClosed": payload.get("arrow_closed", "")})
+    return imr
+
+# --- Tab Manager ---
+# Reusable tab system manager.
+# Produces IM-compatible intent handlers for any module that wants persistent tabbed navigation backed by scoped state.
+# payload is a state package if none is passed it loads it - otherwise this is just focused on nav_bar
+
+async def tab_bar_from_state(state: dict, tab_bar_id: str, intent_prefix: str = "", nesting_level = 1, allow_new: bool = True, closable: bool = True, show_back: bool = False) -> str:
+    ordered = sorted(state.get("tabs", {}).values(), key=lambda t: t.get("order", 0))
+    tabs_html = "".join(UI.tab(t.get("label","tab"), t.get("id", t.get("order", 0)), active = (t.get("id", t.get("order", 0)) == state.get("active")), icon = t.get("icon", ""), tooltip = t.get("path", ""), back_attrs = ({"post":"/im/in","swap":"none","target":"body","vals":json.dumps({"type": f"{intent_prefix}_back","lvl": nesting_level,"branch": intent_prefix,"id": t.get("id", t.get("order", 0))})} if t.get("history") else None), data_reorder_type=f"{intent_prefix}_reorder", data_branch=intent_prefix, data_lvl=nesting_level, on_close = ({"post":"/im/in", "swap":"none", "target":"body", "vals": json.dumps({"type": f"{intent_prefix}_close_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})} if closable else None), htmx = {"post":"/im/in", "swap": "none", "target":"body","vals": json.dumps({"type": f"{intent_prefix}_focus_tab", "lvl": nesting_level, "branch": intent_prefix, "id": t.get("id", t.get("order", 0))})}) for t in ordered)
+    add_btn = {"post":"/im/in", "target":"body", "vals":json.dumps({"type": f"{intent_prefix}_open_tab", "lvl": nesting_level, "branch": intent_prefix}), "swap":"none"} if allow_new else None
+    active_tab = state.get("tabs", {}).get(state.get("active"), {})
+    back_btn = {"post":"/im/in", "target":"body", "vals":json.dumps({"type": f"{intent_prefix}_back", "lvl": nesting_level, "branch": intent_prefix}), "swap":"none"} if (show_back and active_tab.get("history")) else None
+    return UI.tab_bar(content = tabs_html, id = tab_bar_id, add_btn = add_btn, back_btn = back_btn, nesting_level = nesting_level)
+
+# --- Tab Manager ---
+# Reusable tab system manager with built-in lower-level error interception.
+
+class TabManager:
+    _ROUTING_KEYS = {"type", "lvl", "branch", "intent", "module_intent", "cid", "t"}  # IM/intent dispatch metadata - never persisted into tab state
+
+    def __init__(self, namespace, tab_bar_id, content_id, render_content_fn, intent_prefix = "", scope = "user", empty = None, IM = None, tab_bar_fn = None, nesting_level = 1, allow_new = True, closable = True, dedupe_path = False, show_back = False):
+        self.show_back = show_back
+        self.namespace = namespace
+        self.tab_bar_id = tab_bar_id
+        self.content_id = content_id
+        self.render_content_fn = render_content_fn
+        self.tab_bar_fn = tab_bar_fn if tab_bar_fn else tab_bar_from_state
+        self.intent_prefix = intent_prefix
+        self.scope = scope
+        self.IM = IM
+        self.nesting_level = nesting_level
+        self.allow_new = allow_new
+        self.closable = closable
+        self.dedupe_path = dedupe_path
+        if empty is None or not isinstance(empty, dict): self.empty = {"tabs": {}}
+        else: self.empty = copy.deepcopy(empty)
+        if "tabs" not in self.empty or not isinstance(self.empty["tabs"], dict): self.empty["tabs"] = {}
+        if self.IM:
+            p = self.intent_prefix
+            self.IM.scripts[f"{p}_open_tab"]  = [self._open]
+            self.IM.scripts[f"{p}_focus_tab"] = [self._focus]
+            self.IM.scripts[f"{p}_close_tab"] = [self._close]
+            self.IM.scripts[f"{p}_reorder"]   = [self._reorder]
+            self.IM.scripts[f"{p}_back"]      = [self._back]
+
+    async def safe_render_content(self, request, state: dict) -> tuple[dict, str]:
+        """ Lower-level wrapper around the passed render_content_fn. Intercepts all routing drops, key errors, and backend failures cleanly. """
+        try:
+            return await self.render_content_fn(request, state)
+        except Exception as e:
+            active_id = state.get("active")
+            current_tab = state.get("tabs", {}).get(active_id, {}) if active_id else {}
+            failed_target = current_tab.get("path") or current_tab.get("id") or "Unknown View" # Universal non-web fallback identifier resolution
+            error_html = f"""<div class="flex flex-col items-center justify-center h-full p-8 text-center bg-base-300 rounded-lg m-4 border border-error/20">
+                                 <div class="text-5xl mb-3">⛑️</div>
+                                 <h2 class="text-xl font-bold mb-1">404 - Panel Execution Failed</h2>
+                                 <p class="text-sm opacity-70 mb-4">The module or view path requested is unavailable or raised an exception.</p>
+                                 <div class="bg-base-100 p-3 rounded text-left max-w-xl w-full overflow-x-auto border border-base-200 mb-4">
+                                     <div class="text-xs font-mono text-warning mb-1">Target Identity: {failed_target}</div>
+                                     <pre class="text-xs font-mono text-error whitespace-pre-wrap">{str(e)}</pre>
+                                 </div>
+                                 <button class="btn btn-sm btn-outline btn-error" hx-post="/im/in" hx-swap="none" hx-target="body" hx-vals='{{"type": "{self.intent_prefix}_open_tab", "path": "/launcher"}}'>
+                                     Return to Launcher
+                                 </button>
+                             </div>"""
+            return state, error_html
+
+    def next_active(self, state, order=None):
+        """Ensures at least one tab exists and resolves the focused item."""
+        if not state or not isinstance(state, dict): state = copy.deepcopy(self.empty)
+        tabs = state.setdefault("tabs", {})
+        if not isinstance(tabs, dict): tabs = state["tabs"] = {}
+        if not tabs:
+            if self.empty["tabs"]: state["tabs"] = copy.deepcopy(self.empty["tabs"])
+            else:
+                fallback_id = f"tab-{uuid.uuid4().hex[:6]}"
+                state["tabs"][fallback_id] = {"id": fallback_id, "order": 0, "label": "Home", "path": "/launcher"}
+        active = state.get("active")
+        if not active or active not in state["tabs"]:
+            ordered_tabs = sorted(state["tabs"].values(), key=lambda t: t.get("order", 0) if isinstance(t, dict) else 0)
+            if ordered_tabs and isinstance(ordered_tabs[-1], dict): active = ordered_tabs[-1].get("id", "")
+            else: active = list(state["tabs"].keys())[0]
+        state["active"] = active
+        return state
+
+    async def _load(self, request) -> dict:
+        state = await get_state(request, scope = self.scope, namespace = self.namespace) or {}
+        if not state or not isinstance(state, dict): state = copy.deepcopy(self.empty)
+        if "tabs" not in state or not isinstance(state["tabs"], dict): state["tabs"] = copy.deepcopy(self.empty.get("tabs", {}))
+        state["tabs"] = {k: v for k, v in state["tabs"].items() if isinstance(v, dict)}
+        for k, v in state["tabs"].items(): v["id"] = k  # dict key is the single source of truth - heals any drifted/legacy id field
+        return state
+
+    async def _save(self, request, state): return await set_state(request, state, scope = self.scope, namespace = self.namespace)
+
+    async def render_active(self, request) -> str:
+        state = await self._load(request)
+        state = self.next_active(state)
+        _, html = await self.safe_render_content(request, state) # Routed through the internal safety wrapper
+        return html
+
+    async def _push(self, request, state = None, imr = None):
+        if not state: state = await self._load(request)
+        state = self.next_active(state)
+        state, content_html = await self.safe_render_content(request, state) # Routed through the internal safety wrapper
+        bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable, show_back=self.show_back)
+        await self._save(request, state)
+        imr.oob(bar_html, self.tab_bar_id, swap="outerHTML")
+        imr.oob(content_html, self.content_id)
+        return imr
+
+    async def _open(self, request, payload, imr):
+        state = await self._load(request)
+        tab_id = payload.get("id") or f"tab-{uuid.uuid4().hex[:6]}"
+        order = max((t.get("order", 0) for t in state["tabs"].values() if isinstance(t, dict)), default=-1) + 1
+        base_tab = {"id": tab_id, "order": order, "label": payload.get("label", "Tab"), "icon": payload.get("icon", ""), "dirty": False}
+        if "path" in payload or "path" in self.empty.get("tabs", {}).get(tab_id, {}):
+            p = payload.get("path")
+            if not p or str(p).strip() in ["/", ""]:
+                empty_tab = self.empty["tabs"].get(tab_id, {})
+                p = empty_tab.get("path", "/launcher") if isinstance(empty_tab, dict) else "/launcher"
+            base_tab["path"] = p
+        if self.dedupe_path and base_tab.get("path") and tab_id not in state["tabs"]:
+            existing = next((k for k, v in state["tabs"].items() if v.get("path") == base_tab["path"]), None)
+            if existing: tab_id, base_tab["id"] = existing, existing
+        if tab_id not in state["tabs"]: state["tabs"][tab_id] = base_tab
+        else:
+            old_path = state["tabs"][tab_id].get("path")
+            if old_path and base_tab.get("path") and old_path != base_tab["path"]: self.push_history(state["tabs"][tab_id], old_path)
+            state["tabs"][tab_id].update(base_tab)
+        for k, v in payload.items():
+            if k not in ("id", "label", "icon", "order") and k not in self._ROUTING_KEYS: state["tabs"][tab_id][k] = v
+        state["active"] = tab_id
+        return await self._push(request, state, imr)
+
+    async def _focus(self, request, payload, imr):
+        state = await self._load(request)
+        tab_id = payload.get("id", "")
+        if tab_id in state["tabs"]:
+            state["active"] = tab_id
+            return await self._push(request, state, imr)
+        if payload.get("path"): return await self._open(request, payload, imr) # caller supplied enough to legitimately open a new tab - genuine open-on-miss
+        return await self._push(request, state, imr)
+
+    async def _close(self, request, payload, imr):
+        state = await self._load(request)
+        state["tabs"].pop(payload.get("id", ""), None)
+        state = self.next_active(state) # Let next_active naturally resolve default minimum tab count requirements
+        return await self._push(request, state, imr)
+
+    async def _reorder(self, request, payload, imr):
+        state = await self._load(request)
+        src, dst = payload.get("from",""), payload.get("to","")
+        keys = list(state["tabs"].keys())
+        if src in keys and dst in keys:
+            si, di = keys.index(src), keys.index(dst)
+            keys.insert(di, keys.pop(si))
+            state["tabs"] = {k: state["tabs"][k] for k in keys}
+            for i, k in enumerate(keys): 
+                if isinstance(state["tabs"][k], dict): state["tabs"][k]["order"] = i
+        await self._save(request, state)
+        bar_html = await self.tab_bar_fn(state, self.tab_bar_id, self.intent_prefix, self.nesting_level, allow_new=self.allow_new, closable=self.closable, show_back=self.show_back)
+        imr.oob(bar_html, self.tab_bar_id, swap="outerHTML")
+        return imr
+
+    def push_history(self, tab: dict, old_path: str):
+        """Call before overwriting tab['path'] in any same-tab navigation to enable _back."""
+        if old_path:
+            hist = tab.setdefault("history", [])
+            hist.append(old_path)
+            tab["history"] = hist[-50:]
+
+    async def _back(self, request, payload, imr):
+        state = await self._load(request)
+        state = self.next_active(state)
+        tab = state["tabs"].get(payload.get("id") or state.get("active"))
+        if not tab or not tab.get("history"): return imr
+        tab["path"] = tab["history"].pop()
+        return await self._push(request, state, imr)
+
+# --- Chat Manager ---
+# Reusable chat UI - bubble/list/compact/log view styles, HTMX-native, stream-aware.
+
+CHAT_CSS = """
+.cm-shell{display:flex;flex-direction:column;height:100%;width:100%;overflow:hidden;box-sizing:border-box;align-items:center;}
+.cm-shell-inner{display:flex;flex-direction:column;width:100%;max-width:70rem;flex:1;min-height:0;}
+.cm-header{flex-shrink:0;padding:.35rem .6rem;border-bottom:var(--border-thick) solid var(--border);display:flex;align-items:center;gap:.4rem;min-height:2.2rem;width:100%;}
+.cm-msgs{flex:1;overflow-y:auto;padding:.5rem .6rem;display:flex;flex-direction:column;gap:.45rem;min-height:0;scroll-behavior:smooth;}
+.cm-msgs::-webkit-scrollbar{width:.25rem;}
+.cm-msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:.15rem;}
+.cm-stream{flex-shrink:0;padding:0 .6rem;min-height:0;max-height:40vh;overflow-y:auto;}
+.cm-footer{flex-shrink:0;border-top:var(--border-thick) solid var(--border);padding:.4rem .55rem;display:flex;flex-direction:column;gap:.25rem;}
+.cm-no-input .cm-footer{display:none;}
+.cm-input{width:100%;background:var(--bg);color:var(--text);border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.4rem .55rem;font-family:var(--font-main);font-size:var(--font-size);resize:none;overflow-y:auto;min-height:2.4rem;line-height:1.45;box-sizing:border-box;}
+.cm-input:focus{outline:none;border-color:var(--accent);}
+.cm-opts-row{display:flex;align-items:center;gap:.3rem;flex-wrap:wrap;}
+.cm-send{background:var(--accent_dim);color:var(--accent);border:var(--border-thick) solid var(--accent);padding:.28rem .9rem;border-radius:var(--radius);cursor:pointer;font-weight:600;font-size:.8rem;white-space:nowrap;margin-left:auto;}
+.cm-send:hover{background:var(--accent);color:var(--bg);}
+.cm-opt-lbl{display:flex;align-items:center;gap:.2rem;font-size:.7rem;color:var(--text_muted);cursor:pointer;white-space:nowrap;user-select:none;}
+.cm-qbtn{background:none;border:none;color:var(--text_muted);font-size:.8rem;cursor:pointer;padding:.15rem .3rem;border-radius:.3rem;line-height:1;}
+.cm-qbtn:hover{color:var(--accent);background:var(--accent_dim);}
+.cm-tok-hint{font-size:.6rem;color:var(--text_muted);opacity:.7;white-space:nowrap;}
+.cm-msg{display:flex;gap:.3rem;align-items:flex-end;width:100%; position:relative;}
+.cm-msg.cm-me{flex-direction:row-reverse;}
+.cm-msg.cm-sys{opacity:.75;}
+.cm-avatar{width:2.5rem; height:2.5rem; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:.65rem; font-weight:700; color:var(--accent); background:var(--accent_dim);border:var(--border-thick) solid var(--border);overflow:hidden;}
+.cm-avatar img{width:100%; height:100%; object-fit:cover;}
+.cm-bwrap{flex:1;display:flex;flex-direction:column;min-width:0;max-width:92%;}
+.cm-msg.cm-me .cm-bwrap{align-items:flex-end;}
+.cm-msg.cm-sys .cm-bwrap,.cm-msg.cm-full .cm-bwrap{max-width:100%;}
+.cm-msg:hover .cm-acts-side{opacity:1;}
+.cm-acts-side{display:flex;flex-direction:column;gap:.15rem;opacity:0;transition:opacity .15s;flex-shrink:0;justify-content:flex-end;padding-bottom:.35rem;}
+.cm-act{background:var(--surface);border:var(--board-thick) solid var(--border);color:var(--text_muted);border-radius:.3rem;padding:.15rem .35rem;cursor:pointer;font-size:.7rem;line-height:1.2;display:block;white-space:nowrap;text-align:center;}
+.cm-act:hover{color:var(--accent);border-color:var(--accent);}
+.cm-bubble{padding:.5rem .75rem; border-radius:1rem;overflow-wrap:break-word;word-break:break-word;min-width:0;border:var(--border-thick) solid transparent;}
+.cm-me .cm-bubble{border-bottom-right-radius:.2rem;}
+.cm-other .cm-bubble{border-bottom-left-radius:.2rem;}
+.cm-sys .cm-bubble{background:var(--bg_panel);border-color:var(--border);border-radius:.35rem;font-size:.78rem;}
+.cm-meta{font-size:.63rem;opacity:.62;margin-bottom:.12rem;display:flex;align-items:center;gap:.3rem;flex-wrap:wrap;}
+.cm-me .cm-meta{justify-content:flex-end;}
+.cm-content{font-size:.84rem;line-height:1.5;overflow-wrap:break-word;word-break:break-word;min-width:0;}
+.cm-content p{margin:.12rem 0;}.cm-content p:first-child{margin-top:0;}.cm-content p:last-child{margin-bottom:0;}
+.cm-content pre{overflow-x:auto;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;background:var(--surface);border:var(--border-thick) solid var(--border);border-radius:.3rem;padding:.4rem .6rem;margin:.3rem 0;max-width:100%;tab-size:4;}
+.cm-content code{font-family:var(--font-mono);font-size:.82rem;}
+.cm-content pre code{background:none;border:none;padding:0;white-space:pre-wrap;word-break:break-word;}
+.cm-content img{max-width:100%;border-radius:var(--radius);}
+.cm-think{margin-top:.28rem;}
+.cm-think summary{font-size:.67rem;color:var(--text_muted);cursor:pointer;list-style:none;user-select:none;}
+.cm-think summary::-webkit-details-marker{display:none;}
+.cm-think-body{font-size:.7rem;color:var(--text_muted);font-family:var(--font-mono);padding:.3rem .5rem;background:var(--surface);border-radius:.3rem;margin-top:.2rem;white-space:pre-wrap;border:var(--border-thick) solid var(--border);max-height:14rem;overflow-y:auto;}
+.cm-s-list .cm-bubble{border-radius:.35rem;}
+.cm-s-compact .cm-msg{gap:.2rem;}
+.cm-s-compact .cm-bubble{padding:.22rem .4rem;border-radius:.3rem;}
+.cm-s-compact .cm-content{font-size:.78rem;}
+.cm-s-compact .cm-meta{font-size:.58rem;}
+.cm-s-log .cm-msg{flex-direction:column;gap:.08rem;}
+.cm-s-log .cm-bubble{background:none;border:none;padding:.08rem .25rem;border-left:.18rem solid var(--border);border-radius:0;}
+.cm-s-log .cm-bwrap{max-width:100%;}
+.cm-working{display:none;align-items:center;gap:.4rem;font-size:.7rem;color:var(--text_muted);padding:.25rem .6rem;flex-shrink:0;border-top:var(--border-thick) solid var(--border);}
+.cm-working.cm-on{display:flex;}
+.cm-stream-bubble{padding:.5rem .75rem;border-radius:1rem;border-bottom-left-radius:.2rem;background:var(--glass);border:var(--border-thick) solid var(--border);font-size:.84rem;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;}
+.cm-empty{opacity:.45;text-align:center;padding:1.5rem;font-size:.82rem;}
+.cm-pin-on{color:var(--accent) !important;}
+.cm-unread-dot{width:.45rem;height:.45rem;border-radius:50%;background:var(--accent);flex-shrink:0;display:inline-block;}
+"""
+
+CHAT_VOICE_CSS = """
+.cm-audio{display:block;width:100%;max-width:22rem;height:2rem;margin-top:.3rem;}
+.cm-mic,.cm-call,.cm-hush{touch-action:none;user-select:none;-webkit-user-select:none;}
+.cm-mic.active,.cm-call.active,.cm-hush.active{background:var(--accent);color:var(--bg);}
+.cm-vad{font-size:.65rem;color:var(--text_muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:12rem;}
+.cm-cap{flex-shrink:0;max-height:7.5rem;overflow-y:auto;padding:.25rem .6rem;border-top:var(--border-thick) solid var(--border);font-size:.84rem;line-height:1.5;}
+.cm-cap:empty{display:none;}
+.cm-cap-line{color:var(--text_muted);}
+.cm-cap-now{color:inherit;}
+.cm-cap-miss{font-style:italic;}
+.cm-cap-miss::after{content:" (not spoken)";font-size:.65rem;}
+.cm-cap-note{font-size:.65rem;font-style:italic;}
+"""
+
+# Voice for ChatManager (enabled per instance with voice=True): hold-to-talk and hands-free call mode, one shared script for every chat surface.
+# Audio stays in the browser until an utterance ends, then goes to the chat's audio intent as a 16 kHz mono WAV data URL ({cid, audio_b64}).
+# Detection runs on 20 ms frames of the 300-3400 Hz speech band (browser biquad filters):
+#   - energy against an adaptive noise floor set by a short calibration (is something there),
+#   - periodicity of that band (is it a voice): normalized autocorrelation over 70-400 Hz pitch periods; noise, clicks and hum score low,
+#   - an utterance starts after start_ms of energy with at least half its frames voiced, ends after end_ms of quiet, and is sent only if it held
+#     min_voiced_ms of voiced frames - anything less is dropped in the browser and never reaches the server.
+# Echo, in three layers (a loudspeaker hears its own replies):
+#   1. replies play through a local WebRTC loopback (echo_route), so the browser's echo canceller knows what the speaker plays - it otherwise only
+#      knows WebRTC audio, and plain <audio> playback reaches the mic untouched on most platforms;
+#   2. an echo gate (echo_margin_db): while a reply plays, the gap between mic level and speaker output level is learned (the first 300 ms of output
+#      only learn), and the mic counts as talking only when it is clearly louder than that learned echo;
+#   3. talkover = 0 ignores the mic entirely while a reply plays (half-duplex).
+# Coming back to the page (visibilitychange) resumes suspended audio; a call whose mic the browser stopped in the background reopens it and re-measures the room.
+# While a reply plays, starting also needs the stricter barge-in margin held for bargein_ms; the reply is then paused, not stopped. If the utterance is dropped here, or the server reports nothing was heard (a `cm-voice` trigger {sid, heard:false}), the reply resumes; only a sent utterance presses the chat's Stop button (a running turn) and keeps the reply paused.
+# Replies spoken while they are written arrive as `cm-voice-audio` triggers {sid, turn, seq, audio_b64, format, text, lang, voice, error, last}: segments are queued by seq per chat and played back to back (as hidden .cm-audio elements, so barge-in pauses them like any reply). 
+# A newer turn's speech replaces an older turn's (the older one stops, and its late segments are ignored); a sent utterance that stopped a reply drops the rest of that turn.
+# Captions: each segment's text is shown in a .cm-cap box above the footer as it starts playing; a segment that could not be spoken (no audio, or autoplay blocked) is shown marked. 
+# merge_running: an utterance that ends while a turn is still running (even before any audio) presses Stop like a barge-in, so a prompt split by a pause is answered once; the server's transcript verdict still decides.
+# A pushed reply whose autoplay copy would repeat speech already streamed as segments is stopped once and logged to the console.
+# Mute (the speaker button, per chat and per browser, kept in localStorage): pressing it stops the current turn's speech and pauses a reply playing in that chat; while muted, streamed segments are skipped and pushed replies do not autoplay (their players still play when pressed). The turn itself keeps running - Stop is the chat's own button.
+# Raw string: the JS must reach the browser byte for byte.
+CHAT_VOICE_JS = r"""
+window.cmVoice = window.cmVoice || (function(){
+    var WORKLET = "class P extends AudioWorkletProcessor{constructor(){super();this.n=0;this.a=new Float32Array(Math.round(sampleRate*0.02));this.b=new Float32Array(this.a.length)}process(i){var x=i[0];if(!x||!x[0])return true;var r=x[0],f=x[1]||x[0];for(var k=0;k<r.length;k++){this.a[this.n]=r[k];this.b[this.n]=f[k];if(++this.n===this.a.length){this.port.postMessage([this.a.slice(0),this.b.slice(0)]);this.n=0}}return true}}registerProcessor('cm-frames',P)";
+    var M = null, S = null, P = null, O = null, playing = new Set(), AQ = {};
+    var D = {threshold_db: 10, bargein_db: 6, min_db: -55, start_ms: 180, end_ms: 800, preroll_ms: 400, max_ms: 60000, calib_ms: 500, voicing: 0.45, min_voiced_ms: 250, bargein_ms: 400, echo_margin_db: 8, talkover: 1, echo_route: 1, merge_running: 1, captions: 1, caption_lines: 4};
+    
+    document.addEventListener('play', function(e){ var a = e.target; if (!(a.classList && a.classList.contains('cm-audio')) || hushed(a) || replayed(a)) return; playing.add(a); if (S) route(a); }, true);
+    document.addEventListener('submit', function(e){ var f = e.target; if (f.classList && f.classList.contains('cm-form') && AQ[f.dataset.cmSid]) AQ[f.dataset.cmSid].spoken = false; }, true);   // a typed turn starts fresh
+    ['pause', 'ended', 'emptied'].forEach(function(n){ document.addEventListener(n, function(e){ playing.delete(e.target); }, true); });
+    document.addEventListener('visibilitychange', function(){ if (!document.hidden) revive(); });   // phones suspend audio in the background
+    async function revive(){   // on return: resume what the browser suspended; a call whose mic was stopped gets a fresh mic and room measurement
+        if (O && O.ctx.state !== 'running') O.ctx.resume().catch(function(){});
+        if (!S || S.mode !== 'call' || !M) return;
+        if (M.ctx.state !== 'running') await M.ctx.resume().catch(function(){});
+        if (M.ctx.state === 'running' && M.stream.getAudioTracks().some(function(t){ return t.readyState === 'live'; })) return;
+        var sid = S.cfg.sid; close(); Object.assign(S, {state: 'listening', rec: [], pre: [], above: 0, vrun: 0, below: 0, voiced: 0});
+        try { await mic(); show('back - stay quiet a moment', sid); } catch (e) { fail(e, sid); }
+    }
+    document.addEventListener('cm-voice', function(e){   // server verdict on the last sent utterance that paused or cut a reply
+        var d = e.detail || {}; if (!P || P.sid !== d.sid) return;
+        if (!d.heard) { resume(P.els); show('nothing heard - reply continues', d.sid); } else if (AQ[d.sid]) drop(AQ[d.sid]);
+        P = null;
+    });
+    document.addEventListener('cm-voice-audio', function(e){   // one spoken segment of a reply that is still being written
+        var d = e.detail || {}, q = AQ[d.sid];
+        if (!q || q.turn !== d.turn) {
+            var gone = q ? q.gone : {};
+            if (gone[d.turn]) return;   // a late segment of a turn a newer one already replaced
+            if (q) { gone[q.turn] = 1; drop(q); }   // a newer turn's speech replaces an older turn's: never two at once
+            q = AQ[d.sid] = {sid: d.sid, turn: d.turn, next: 0, parts: {}, cur: null, dropped: false, spoken: false, gone: gone};
+        }
+        if (q.dropped || d.last || MUTE[d.sid]) return;   // muted: the reply is still written in the chat, only its speech is skipped
+        q.spoken = true; q.parts[d.seq] = d; playNext(d.sid);
+    });
+
+    // --- mute: per chat, per browser (a phone can be muted while the desktop speaks); muting also stops what is speaking now ---
+    var MUTE = {};
+    try { MUTE = JSON.parse(localStorage.getItem('cmVoiceMute') || '{}') || {}; } catch (e) {}
+    function hush(btn, ev){
+        ev.preventDefault();
+        var sid = btn.dataset.cmSid;
+        if (MUTE[sid]) delete MUTE[sid]; else { MUTE[sid] = 1; silence(sid); }
+        try { localStorage.setItem('cmVoiceMute', JSON.stringify(MUTE)); } catch (e) {}
+        mark(sid);
+    }
+    function silence(sid){   // the current turn's speech stops for good (playing and queued); a pushed reply playing in this chat pauses
+        if (AQ[sid]) drop(AQ[sid]);
+        var f = document.querySelector('.cm-form[data-cm-sid="' + sid + '"]'), shell = f && f.closest('.cm-shell');
+        Array.from(playing).forEach(function(a){ if (shell && shell.contains(a)) a.pause(); });
+    }
+    function hushed(a){   // a pushed reply's automatic play in a muted chat is stopped; pressing play on its player still works
+        if (!a.autoplay) return false;
+        var f = a.closest('.cm-shell'), form = f && f.querySelector('.cm-form');
+        if (!form || !MUTE[form.dataset.cmSid]) return false;
+        a.autoplay = false; a.pause();
+        return true;
+    }
+    function mark(sid){ document.querySelectorAll('.cm-hush[data-cm-sid="' + sid + '"]').forEach(function(b){ var m = !!MUTE[sid]; b.classList.toggle('active', m); b.innerHTML = m ? '&#x1F507;' : '&#x1F50A;'; b.title = m ? 'Replies are muted in this chat (this browser) - tap to hear them again' : 'Stop speaking now and mute replies (the reply is still written); tap again to hear replies'; }); }
+    function marks(r){ if (r && r.querySelectorAll) r.querySelectorAll('.cm-hush').forEach(function(b){ if (MUTE[b.dataset.cmSid]) mark(b.dataset.cmSid); }); }
+    document.addEventListener('htmx:load', function(e){ marks(e.target); });   // a chat rendered later shows its stored state
+    marks(document);
+    function drop(q){   // stops a turn's speech for good: what is playing and what is still queued
+        if (q.dropped) return;
+        if (q.cur || Object.keys(q.parts).length) caption(q.sid, 'reply cut', 'cm-cap-note');
+        q.dropped = true; q.parts = {};
+        if (q.cur) { q.cur.pause(); q.cur.remove(); q.cur = null; }
+    }
+    function replayed(a){   // true (and stopped) for a pushed reply's autoplay copy when that chat's turn already streamed its speech as segments
+        if (!a.autoplay) return false;
+        a.autoplay = false;   // only the first play can be the automatic one; the player stays usable for replay
+        var f = a.closest('.cm-shell'), form = f && f.querySelector('.cm-form'), q = form && AQ[form.dataset.cmSid];
+        if (!q || !q.spoken) return false;
+        q.spoken = false; a.pause();
+        console.warn('cmVoice: a reply already spoken as streamed segments was also pushed with autoplay - the automatic replay was stopped; the audio intent should not set autoplay on a streamed turn');
+        return true;
+    }
+    function playNext(sid){
+        var q = AQ[sid]; if (!q || q.dropped || q.cur) return;
+        if (S && S.mode === 'call' && S.state === 'speaking') { setTimeout(function(){ playNext(sid); }, 300); return; }   // never start the next sentence over someone talking
+        var d = q.parts[q.next]; if (!d) return;
+        delete q.parts[q.next]; q.next++;
+        if (!d.audio_b64) { caption(sid, d.error ? d.text + ' [not spoken - ' + d.error + ']' : d.text, 'cm-cap-miss'); if (d.error) console.warn('cmVoice: segment ' + d.seq + ' (' + (d.lang || 'default language') + ', voice ' + (d.voice || 'node default') + ') not spoken - ' + d.error); playNext(sid); return; }   // a segment the speech node failed on is shown with the reason, not spoken; the order holds
+        var a = document.createElement('audio'); a.className = 'cm-audio'; a.style.display = 'none'; a.src = 'data:audio/' + (d.format || 'wav') + ';base64,' + d.audio_b64;
+        document.body.appendChild(a); q.cur = a;   // in the document, so the play/pause listeners (barge-in) see it
+        var line = null, done = function(){ a.remove(); if (q.cur === a) q.cur = null; playNext(sid); };
+        a.addEventListener('ended', done); a.addEventListener('error', done);
+        var p = a.play(); if (p && p.catch) p.catch(function(e){ if (!e || e.name !== 'NotAllowedError') return; show('tap the page once to allow audio', sid); if (line) line.classList.add('cm-cap-miss'); done(); });   // AbortError is a barge-in pause, not a block
+        line = caption(sid, d.text);   // after play(): the caption shows what is being said and never decides whether it is said
+    }
+
+    // --- captions: each segment's text as it starts playing, and segments that could not be spoken ---
+    function capBox(sid){
+        var f = document.querySelector('.cm-form[data-cm-sid="' + sid + '"]'), shell = f && f.closest('.cm-shell');
+        if (!shell || !copt(sid, 'captions')) return null;
+        var c = shell.querySelector('.cm-cap');
+        if (!c) { var foot = f.closest('.cm-footer'); c = document.createElement('div'); c.className = 'cm-cap'; c.setAttribute('role', 'log'); c.setAttribute('aria-label', 'Spoken reply captions'); foot.parentNode.insertBefore(c, foot); }   // into the footer's own parent (.cm-shell-inner), directly above it
+        return c;
+    }
+    function caption(sid, text, cls){
+        var c = text && capBox(sid); if (!c) return null;
+        var now = c.querySelector('.cm-cap-now'), l = document.createElement('div');
+        if (now) now.classList.remove('cm-cap-now');
+        l.className = 'cm-cap-line cm-cap-now' + (cls ? ' ' + cls : ''); l.textContent = text; c.appendChild(l);
+        while (c.children.length > copt(sid, 'caption_lines')) c.removeChild(c.firstChild);
+        c.scrollTop = c.scrollHeight;
+        return l;
+    }    
+    
+    // --- reply output: element sources -> analyser (the echo reference) -> sink -> WebRTC loopback (or the speakers until it connects / if it cannot) ---
+    function out(){
+        if (O) return O;
+        var ctx = new AudioContext(), an = ctx.createAnalyser(), sink = ctx.createGain();
+        an.fftSize = 2048; sink.connect(ctx.destination);
+        O = {ctx: ctx, an: an, sink: sink, buf: new Float32Array(an.fftSize), hist: []};
+        if (opt('echo_route')) loop(O).catch(function(e){ console.warn('cmVoice: echo loopback unavailable, replies play directly', e); });
+        return O;
+    }
+    async function loop(o){
+        var dest = o.ctx.createMediaStreamDestination(), a = new RTCPeerConnection(), b = new RTCPeerConnection(), el = new Audio();
+        a.onicecandidate = function(e){ if (e.candidate) b.addIceCandidate(e.candidate); };
+        b.onicecandidate = function(e){ if (e.candidate) a.addIceCandidate(e.candidate); };
+        b.ontrack = function(e){ el.srcObject = e.streams[0]; el.play().then(function(){ o.sink.disconnect(o.ctx.destination); o.looped = el; }).catch(function(){}); };   // the speakers switch to the loopback only once it plays
+        o.sink.connect(dest); dest.stream.getTracks().forEach(function(t){ a.addTrack(t, dest.stream); });
+        var off = await a.createOffer(); await a.setLocalDescription(off); await b.setRemoteDescription(off);
+        var ans = await b.createAnswer(); await b.setLocalDescription(ans); await a.setRemoteDescription(ans);
+        o.pcs = [a, b];
+    }
+    function route(a){   // once per element: it then sounds only through the graph
+        var o = out();
+        if (!a._cmOut) { try { var s = o.ctx.createMediaElementSource(a); s.connect(o.an); s.connect(o.sink); a._cmOut = 1; } catch (e) { a._cmOut = -1; } }
+        if (o.ctx.state === 'suspended') o.ctx.resume();
+    }
+    function outDb(){ if (!O) return -120; O.an.getFloatTimeDomainData(O.buf); O.hist.push(db(O.buf)); if (O.hist.length > 3) O.hist.shift(); return Math.max.apply(null, O.hist); }   // the loudest of the last 3 frames covers the acoustic delay
+    function echoGate(e, o){   // true when the mic is clearly louder than the reply's own sound arriving at it; learns that level while it is not
+        var m = opt('echo_margin_db'), d = e - o;
+        if (!m || o < -80) return true;
+        if (M.ern < 15) { M.erl = M.ern++ ? Math.max(M.erl, d) : d; return false; }
+        if (d < M.erl + m) { M.erl += d > M.erl ? 0.3 * (d - M.erl) : -0.02; return false; }
+        return true;
+    }
+
+    function pick(c, k){ return (c && c[k] !== undefined && c[k] !== null && c[k] !== '') ? Number(c[k]) : D[k]; }
+    function opt(k){ return pick(S && S.cfg, k); }
+    function copt(sid, k){ var b = document.querySelector('.cm-form[data-cm-sid="' + sid + '"] .cm-mic'); return pick(b && JSON.parse(b.dataset.cmVoice), k); }   // a chat's own setting when no mic session is open
+    function show(t, sid){ var el = document.getElementById('cm-vad-' + (sid || (S && S.cfg.sid))); if (el) el.textContent = t; }
+    function db(x){ var s = 0; for (var i = 0; i < x.length; i++) s += x[i] * x[i]; return 10 * Math.log10(s / x.length + 1e-12); }
+    function frames(ms){ return Math.ceil(ms / 20); }
+
+    function voicing(x){
+        // Peak normalized autocorrelation over pitch periods 70-400 Hz, on the band channel decimated to ~16 kHz (it is already low-passed at 3.4 kHz).
+        var d = Math.max(1, Math.round(M.rate / 16000)), n = Math.floor(x.length / d), y = new Float32Array(n), m = 0, i, lag, best = 0;
+        for (i = 0; i < n; i++) { y[i] = x[i * d]; m += y[i]; }
+        m /= n;
+        for (i = 0; i < n; i++) y[i] -= m;
+        var sr = M.rate / d, lo = Math.floor(sr / 400), hi = Math.min(Math.ceil(sr / 70), n - Math.floor(n / 3));
+        for (lag = lo; lag <= hi; lag++) {
+            var s = 0, ea = 0, eb = 0;
+            for (i = 0; i + lag < n; i++) { s += y[i] * y[i + lag]; ea += y[i] * y[i]; eb += y[i + lag] * y[i + lag]; }
+            var r = s / Math.sqrt(ea * eb + 1e-12);
+            if (r > best) best = r;
+        }
+        return best;
+    }
+
+    async function mic(){
+        if (M) return M;
+        var stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1}});
+        var ctx = new AudioContext();
+        await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], {type: 'application/javascript'})));
+        var src = ctx.createMediaStreamSource(stream), f = function(t, hz){ var b = ctx.createBiquadFilter(); b.type = t; b.frequency.value = hz; return b; };
+        var aa = f('lowpass', 7000), hp = f('highpass', 300), lp = f('lowpass', 3400), merge = ctx.createChannelMerger(2), mute = ctx.createGain();
+        src.connect(aa); aa.connect(merge, 0, 0);                 // channel 0: what gets sent (band-limited for the 16 kHz resample)
+        src.connect(hp); hp.connect(lp); lp.connect(merge, 0, 1); // channel 1: speech band, detection only
+        var node = new AudioWorkletNode(ctx, 'cm-frames', {numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit'});
+        mute.gain.value = 0; merge.connect(node); node.connect(mute); mute.connect(ctx.destination);   // a silent sink keeps the worklet scheduled
+        node.port.onmessage = function(e){ frame(e.data[0], e.data[1]); };
+        M = {stream: stream, ctx: ctx, rate: ctx.sampleRate, cal: frames(D.calib_ms), fs: 0, fn: 0, floor: -90, erl: 0, ern: 0};
+        playing.forEach(route);
+        return M;
+    }
+
+    function close(){ if (!M) return; M.stream.getTracks().forEach(function(t){ t.stop(); }); M.ctx.close(); M = null; }
+
+    function pauseAll(){ var els = Array.from(playing); els.forEach(function(a){ a.pause(); }); return els; }
+    function resume(els){ (els || []).forEach(function(a){ if (a.isConnected && a.paused && !a.ended) { var p = a.play(); if (p && p.catch) p.catch(function(){}); } }); }
+
+    function frame(raw, band){
+        if (S && !document.body.contains(S.btn)) { var sid = S.cfg.sid; resume(S.paused); S = null; close(); show('', sid); return; }   // the chat was re-rendered or closed
+        if (S && S.mode === 'hold') S.rec.push(raw);
+        var e = db(band);
+        if (M.cal > 0) { M.fs += e; M.fn++; M.floor = M.fs / M.fn; if (--M.cal === 0 && S && S.mode === 'call') show('listening'); return; }
+        var guard = playing.size > 0 && !(S && S.state === 'speaking');   // a reply is playing and we are not yet in an utterance: barge-in rules apply
+        var clear = !guard || (echoGate(e, outDb()) && opt('talkover'));
+        var speech = clear && e > M.floor + opt('threshold_db') + (guard ? opt('bargein_db') : 0) && e > opt('min_db');
+        var voiced = speech && voicing(band) >= opt('voicing');
+        M.floor = e < M.floor ? M.floor * 0.9 + e * 0.1 : M.floor + (speech ? 0.0002 : 0.01) * (e - M.floor);   // falls fast to quiet, creeps up slowly, barely moves during speech
+        if (!S || S.mode !== 'call') return;
+        S.pre.push(raw); while (S.pre.length > frames(Math.max(opt('preroll_ms'), opt('start_ms') + 200, opt('bargein_ms') + 200))) S.pre.shift();
+        if (S.state === 'listening') {
+            S.above = speech ? S.above + 1 : 0; S.vrun = speech ? S.vrun + (voiced ? 1 : 0) : 0;
+            if (S.above >= frames(opt(guard ? 'bargein_ms' : 'start_ms')) && S.vrun * 2 >= S.above) {
+                S.paused = guard ? pauseAll() : []; S.state = 'speaking'; S.rec = S.pre.slice(); S.below = 0; S.voiced = S.vrun;
+                show(S.paused.length ? 'interrupting - reply paused' : 'hearing you');
+            }
+        } else {
+            S.rec.push(raw); S.below = speech ? 0 : S.below + 1; if (voiced) S.voiced++;
+            if (S.below >= frames(opt('end_ms')) || S.rec.length * 20 >= opt('max_ms')) finish();
+        }
+    }
+
+    function finish(){
+        var rec = S.rec.slice(0, S.rec.length - Math.max(0, S.below - 10)), paused = S.paused, voicedMs = S.voiced * 20;
+        S.rec = []; S.state = 'listening'; S.above = 0; S.vrun = 0; S.paused = [];
+        if (voicedMs < opt('min_voiced_ms')) { resume(paused); show('ignored - no clear speech'); return; }
+        var shell = S.btn.closest('.cm-shell'), stop = shell && shell.querySelector('.cm-working.cm-on [hx-post]');
+        if (paused.length || (stop && opt('merge_running'))) {   // a reply playing, or a turn still being written: this utterance continues it, and the server's verdict decides
+            if (stop) stop.click();
+            P = {sid: S.cfg.sid, els: paused};
+        }                
+        send(rec);
+    }
+
+    function send(frames_){
+        var n = frames_.reduce(function(a, f){ return a + f.length; }, 0);
+        if (n < M.rate * 0.3) { show('too short - keep talking a little longer'); return; }
+        var x = new Float32Array(n), o = 0;
+        frames_.forEach(function(f){ x.set(f, o); o += f.length; });
+        show(S.mode === 'call' ? 'sent - listening' : 'sent');
+        if (AQ[S.cfg.sid]) AQ[S.cfg.sid].spoken = false;        
+        htmx.ajax('POST', '/im/in', {values: {type: S.cfg.intent, cid: S.cfg.sid, branch: S.cfg.branch, lvl: S.cfg.lvl, audio_b64: wav(x, M.rate)}, swap: 'none'});
+    }
+
+    function wav(x, rate){
+        var out = 16000, len = Math.floor(x.length * out / rate), b = new DataView(new ArrayBuffer(44 + len * 2));
+        var s = function(o, str){ for (var i = 0; i < str.length; i++) b.setUint8(o + i, str.charCodeAt(i)); };
+        s(0, 'RIFF'); b.setUint32(4, 36 + len * 2, true); s(8, 'WAVE'); s(12, 'fmt '); b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true);
+        b.setUint32(24, out, true); b.setUint32(28, out * 2, true); b.setUint16(32, 2, true); b.setUint16(34, 16, true); s(36, 'data'); b.setUint32(40, len * 2, true);
+        for (var i = 0; i < len; i++) { var p = i * rate / out, j = Math.floor(p), t = p - j, v = (x[j] || 0) * (1 - t) + (x[j + 1] || 0) * t; b.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 32767, true); }
+        var bytes = new Uint8Array(b.buffer), bin = '';
+        for (var m = 0; m < bytes.length; m += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(m, m + 0x8000));
+        return 'data:audio/wav;base64,' + btoa(bin);
+    }
+
+    function fail(e, sid){ show(e && e.name === 'NotAllowedError' ? 'mic blocked - allow it in the browser' : 'mic unavailable (' + (e && e.name) + ') - needs https or localhost', sid); }
+
+    async function hold(btn, ev){
+        ev.preventDefault();
+        if (S) return;
+        var c = JSON.parse(btn.dataset.cmVoice);
+        S = {cfg: c, btn: btn, mode: 'hold', rec: [], pre: [], held: true, paused: []}; btn.classList.add('active'); show('opening mic', c.sid);
+        try { await mic(); } catch (e) { fail(e, c.sid); S = null; btn.classList.remove('active'); return; }
+        if (!S || !S.held) { close(); return; }
+        show('listening - release to send');
+    }
+
+    function release(btn){
+        if (!S || S.mode !== 'hold' || !S.held) return;
+        S.held = false; btn.classList.remove('active');
+        if (M) send(S.rec);
+        S = null; close();
+    }
+
+    async function toggleCall(btn){
+        var c = JSON.parse(btn.dataset.cmVoice);
+        if (S && S.mode === 'call') { resume(S.paused); S = null; btn.classList.remove('active'); close(); show('', c.sid); return; }
+        if (S) return;
+        S = {cfg: c, btn: btn, mode: 'call', state: 'listening', rec: [], pre: [], above: 0, vrun: 0, below: 0, voiced: 0, paused: []}; btn.classList.add('active'); show('opening mic', c.sid);
+        try { await mic(); } catch (e) { fail(e, c.sid); S = null; btn.classList.remove('active'); return; }
+        if (M.cal > 0) show('stay quiet a moment - measuring the room');
+    }
+
+    return {hold: hold, release: release, toggleCall: toggleCall, hush: hush};
+})();
+"""
+
+CHAT_SCRIPT = """
+function cmCopyText(text) {
+    if (!text) { cmToast('Nothing to copy'); return; }
+    var ok = function(){ cmToast('Copied'); }, bad = function(){ cmToast('Copy failed'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(ok).catch(function(){ if (cmCopyFallback(text)) ok(); else bad(); }); }
+    else { if (cmCopyFallback(text)) ok(); else bad(); }
+}
+function cmCopyFallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    var r = false;
+    try { r = document.execCommand('copy'); } catch(e) {}
+    document.body.removeChild(ta);
+    return r;
+}
+function cmCopyConversation(sid) {
+    var msgs = document.getElementById('cm-msgs-' + sid);
+    if (!msgs) { cmToast('Nothing to copy'); return; }
+    var NL = String.fromCharCode(10);
+    var parts = Array.from(msgs.querySelectorAll('.cm-msg')).map(function(m) {
+        var b = m.querySelector('.cm-bubble'); if (!b) return '';
+        var who = m.classList.contains('cm-me') ? 'You' : (m.classList.contains('cm-sys') ? 'System' : 'Assistant');
+        return '**' + who + ':** ' + (b.dataset.raw || b.innerText);
+    }).filter(Boolean);
+    cmCopyText(parts.join(NL + NL));
+}
+function cmToast(msg) {
+    var t = document.createElement('div');
+    t.textContent = msg;
+    t.style.cssText = 'position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%);background:var(--accent_dim);color:var(--accent);border:var(--border-thick) solid var(--accent);padding:.4rem .9rem;border-radius:var(--radius);font-size:.8rem;z-index:99999;opacity:0;transition:opacity .15s';
+    document.body.appendChild(t);
+    requestAnimationFrame(function(){ t.style.opacity='1'; });
+    setTimeout(function(){ t.style.opacity='0'; setTimeout(function(){ t.remove(); }, 200); }, 1400);
+}
+(function(){
+    // Auto-resize input and estimate tokens
+    document.addEventListener('input', function(e){
+        var el = e.target; if(!el.classList.contains('cm-input')) return;
+        el.style.height = 'auto';
+        var maxH = window.innerHeight * parseFloat((el.closest('.cm-shell')||{}).dataset?.maxIn||'40') / 100;
+        el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
+        el.style.overflowY = el.scrollHeight > maxH ? 'auto' : 'hidden';
+        var hint = document.getElementById('cm-tok-' + el.id.replace('cm-in-',''));
+        if(hint) hint.textContent = '~' + Math.max(1, Math.round(el.value.length/4)) + 't';
+    });
+    // Ctrl+Enter to submit (Leaves normal Enter alone for newlines)
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            var el = e.target; if(!el.classList.contains('cm-input')) return;
+            e.preventDefault();
+            var shell = el.closest('.cm-shell') || document;
+            var btn = shell.querySelector('.cm-send');
+            if (btn) btn.click();
+        }
+    });
+    // Pinning / manual scroll controls
+    document.addEventListener('click', function(e){
+        var btn = e.target.closest('[data-cm-pin]'); if(!btn) return;
+        var msgs = document.getElementById('cm-msgs-'+btn.dataset.cmPin); if(!msgs) return;
+        var now = msgs.dataset.pinned !== 'true';
+        msgs.dataset.pinned = now?'true':'false';
+        btn.classList.toggle('cm-pin-on', now);
+        if(now) msgs.scrollTo({top:msgs.scrollHeight, behavior:'smooth'});
+    });
+    // Reset UI on form submit
+    document.addEventListener('submit', function(e) {
+        var form = e.target; if(!form.classList.contains('cm-form')) return;
+        var sid = form.dataset.cmSid;
+        var ta = document.getElementById('cm-in-' + sid);
+        if (ta && !ta.value.trim()) { e.preventDefault(); return; }
+        if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+        var hint = document.getElementById('cm-tok-' + sid); if(hint) hint.textContent = '~0t';
+    });
+ 
+    // --- HTMX Auto-Scroll Additions ---
+    // Scroll to bottom when a conversation is first loaded into the workspace
+    document.body.addEventListener('htmx:afterSwap', function(evt) {if (evt.detail.target.id === 'ait-workspace') {var chatContainer = document.querySelector('.ath-conv-list'); if (chatContainer) {chatContainer.scrollTop = chatContainer.scrollHeight;}}});
+    // Keep scrolled to bottom during streaming (OOB swaps)
+    document.body.addEventListener('htmx:oobAfterSwap', function(evt) { var chatContainer = document.querySelector('.ath-conv-list'); if (chatContainer) {chatContainer.scrollTop = chatContainer.scrollHeight;} });
+})();
+""" + MD_CODE_MIRROR_INIT_JS
+
+class ChatManager:
+
+    @property
+    def CSS(self): return (CHAT_CSS + f""".cm-me .cm-bubble{{background:var(--rp-bubble-me-bg, {self.bubble_me_bg});border-color:var(--rp-bubble-me-border, {self.bubble_me_border});}}.cm-other .cm-bubble{{background:var(--rp-bubble-other-bg, {self.bubble_other_bg});border-color:var(--rp-bubble-other-border, {self.bubble_other_border});}}""")
+
+    SCRIPT = CHAT_SCRIPT + CHAT_VOICE_JS   # the voice script is inert unless a chat renders voice controls
+
+    def __init__(self, **kwargs):
+        self.namespace = kwargs.get('namespace', "chat")
+        self.base_url = kwargs.get('base_url', "").rstrip("/")
+        self.scope = kwargs.get('scope', "user")
+        self.view_style = kwargs.get('view_style', "bubble")
+        if self.view_style not in ("bubble","list","compact","log"): self.view_style = "bubble"
+        self.markdown = kwargs.get('markdown', True)
+        self.markdown_mode = kwargs.get('markdown_mode', "standard")
+        self.show_avatars = kwargs.get('show_avatars', True)
+        self.input_enabled = kwargs.get('input_enabled', True)
+        self.input_max_pct = max(10, min(kwargs.get('input_max_pct', 40), 70))
+        self.placeholder = kwargs.get('placeholder', "Type a message\u2026 (Ctrl+Enter to send)")
+        self.allow_edit = kwargs.get('allow_edit', True)
+        self.allow_delete = kwargs.get('allow_delete', True)
+        self.allow_copy = kwargs.get('allow_copy', True)
+        self.show_info = kwargs.get('show_info', True)
+        self.collapsible = kwargs.get('collapsible', True)
+        self.stream_toggle = kwargs.get('stream_toggle', True)
+        self.think_toggle = kwargs.get('think_toggle', False)
+        self.stop_enabled = kwargs.get('stop_enabled', True)
+        self.show_export = kwargs.get('show_export', True)
+        self.show_config = kwargs.get('show_config', False)
+        self.codemirror_enabled = kwargs.get('codemirror_enabled', True)
+        self.show_attach = kwargs.get('show_attach', False)
+        self.show_pipeline = kwargs.get('show_pipeline', False)
+        self.intent_prefix = kwargs.get('intent_prefix', "")
+        self.action_intent_prefix = kwargs.get('action_intent_prefix', "")
+        self.inrows = kwargs.get('inrows', 2)
+        self.wordwrap = kwargs.get('wordwrap', True)
+        self.bubble_margin = kwargs.get('bubble_margin', 8)
+        self.max_bubble_width = kwargs.get('max_bubble_width', 90)
+        self.avatar_size = kwargs.get('avatar_size', 50)
+        self.pin_enabled = kwargs.get('pin_enabled', True)
+        self.bubble_me_bg = kwargs.get('bubble_me_bg', 'rgba(0, 160, 220, .18)')
+        self.bubble_me_border = kwargs.get('bubble_me_border', 'rgba(0, 180, 255, .4)')
+        self.bubble_other_bg = kwargs.get('bubble_other_bg', 'var(--glass)')
+        self.bubble_other_border = kwargs.get('bubble_other_border', 'var(--border)')
+        self.show_info = kwargs.get('show_info', True)
+        self.show_model = kwargs.get('show_model', False)
+        self.branch_id = kwargs.get('branch_id', '')
+        self.nesting_level = kwargs.get('nesting_level', 1)
+        self.IM = kwargs.get('IM', None)
+        self.intent_name = kwargs.get('intent_name', "submit")
+        self.voice = kwargs.get('voice', False)                                     # footer mic: hold-to-talk + hands-free call mode (the browser allows the mic on https or localhost only)
+        self.audio_intent = kwargs.get('audio_intent', f"{self.namespace}_audio")   # intent each finished utterance is posted to: {cid, audio_b64 = 16 kHz mono WAV data URL}
+        if self.IM is not None and kwargs.get('on_submit'): self.IM.scripts[self.intent_name] = [kwargs['on_submit']]
+
+    @property
+    def CSS(self): return (CHAT_CSS + CHAT_VOICE_CSS + f""".cm-me .cm-bubble{{background:{self.bubble_me_bg};border-color:{self.bubble_me_border};}}.cm-other .cm-bubble{{background:{self.bubble_other_bg};border-color:{self.bubble_other_border};}}""")
+
+    def shell(self, sid, messages=None, user=None, header_html="", extra_footer="", sprites=None, viewer_name="", room_owner="", is_working=False, partial_content="", partial_thinking="", owns_conversation=False, stop_intent="", voice_opts=None):
+        style_cls = f"cm-s-{self.view_style}"
+        no_in_cls = " cm-no-input" if not self.input_enabled else ""
+        vname = viewer_name or (user.username if user else "")
+        msgs_html = self.render_messages(messages, vname, user, sprites, room_owner, owns_conversation) if messages is not None else '<div class="cm-empty">No messages yet.</div>'
+        hdr = f'<div class="cm-header">{header_html}</div>' if header_html else ""
+        footer = self._footer_html(sid, extra_footer, voice_opts) if self.input_enabled or extra_footer else ""
+        if is_working: work_html = self.working_html(sid, stop_intent).replace(' hx-swap-oob="outerHTML"', '')
+        else: work_html = f'<div id="cm-work-{sid}" class="cm-working"></div>'
+        if partial_content or partial_thinking: stream_html = self.stream_content_html(sid, partial_content, partial_thinking).replace(' hx-swap-oob="innerHTML"', 'class="cm-stream"')
+        else: stream_html = f'<div id="cm-stream-{sid}" class="cm-stream"></div>'
+        return f"""<div class="cm-shell {style_cls}{no_in_cls}" data-max-in="{self.input_max_pct}"><div class="cm-shell-inner">{hdr}<div id="cm-msgs-{sid}" class="cm-msgs" data-pinned="true">{msgs_html}</div>{stream_html}{work_html}{footer}</div></div>"""
+
+    def render_messages(self, messages, viewer_name="", user=None, sprites=None, room_owner="", owns_conversation=False):
+        if not messages: return '<div class="cm-empty">No messages yet.</div>'
+        sprites = sprites or {}; vname = viewer_name or (user.username if user else "")
+        role_u = getattr(user, "role", "user") if user else "user"
+        out = ""
+        for m in messages:
+            if m.get("deleted"): continue
+            uname = m.get("user_name","") or m.get("persona_name","")
+            is_me = (uname == vname) if uname else (m.get("role") == "user" and bool(vname))
+            can_del = is_me or room_owner == vname or role_u in ("admin","moderator") or owns_conversation
+            out += self.render_message(m, is_me=is_me, can_edit=is_me, can_delete=can_del, sprites=sprites)
+        return out or '<div class="cm-empty">No messages.</div>'
+
+    def render_message(self, msg, is_me=False, can_edit=False, can_delete=False, sprites=None):
+        sprites = sprites or {}
+        role = msg.get("role","user"); mid = msg.get("id","")
+        display = msg.get("user_name") or msg.get("persona_name") or ("AI" if role == "assistant" else "?")
+        content_raw = msg.get("content","")
+        content = md_plus_transpiler(content_raw, mode=self.markdown_mode) if self.markdown else UI.escape(content_raw)
+        thinking = msg.get("thinking", "")
+        think_html = (f'<details class="cm-think"><summary>&#x1F9E0; Thinking ({len(thinking)//4} tokens)</summary><div class="cm-think-body">{UI.escape(thinking)}</div></details>') if (thinking and self.collapsible) else ""
+        t = msg.get("timestamp","") or msg.get("created_at","")
+        ts = (str(t)[:16].replace("T"," ") if isinstance(t, str) else t.strftime("%H:%M")) if t else ""
+        info_parts = []; tok_count = f'~{len(content_raw)//4}t' if self.show_info else ""
+        if self.show_model and msg.get("model"): info_parts.append(msg["model"].split(":")[0])
+        if self.show_info and msg.get("prompt_tokens"): info_parts.append(f'{msg["prompt_tokens"]}+{msg.get("response_tokens",0)}t')
+        meta_left = UI.escape(display) if not is_me else ""
+        meta_right = " ".join(filter(None, [ts] + info_parts + ([tok_count] if tok_count else [])))
+        edited = ' <span style="opacity:.5;font-size:.58rem">(edited)</span>' if msg.get("edited") else ""
+        meta = f'<div class="cm-meta">{meta_left}{" - " if meta_left and meta_right else ""}{meta_right}{edited}</div>' if (meta_left or meta_right) else ""
+        audio = msg.get("audio") or {}   # {"url", "autoplay"?}: native player = replay; autoplay is set only on the freshly pushed copy, never stored
+        audio_html = f"""<audio class="cm-audio" controls preload="none" {"autoplay" if audio.get("autoplay") else ""} src="{UI.escape(audio["url"])}"></audio>""" if audio.get("url") else ""
+        bubble = f"""<div class="cm-bubble" id="cm-bubble-{mid}" data-raw="{UI.escape(content_raw)}">{meta}<div class="cm-content">{content}</div>{audio_html}{think_html}</div>""" # data-raw stores original markdown for copy
+        acts = []
+        if self.allow_copy and mid: acts.append(f"""<button class="cm-act" onclick="cmCopyText(document.getElementById('cm-bubble-{mid}').dataset.raw||'')" title="Copy markdown">&#x2398;</button>""")
+        if can_edit and self.allow_edit and mid:
+            if self.action_intent_prefix: acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type": "{self.action_intent_prefix}_msg_edit_form", "id": "{mid}", "lvl":{self.nesting_level}}}' title="Edit">&#x270E;</button>""")
+            elif self.base_url: acts.append(f"""<button class="cm-act" hx-get="{self.base_url}/msg/edit_form/{mid}" hx-target="#cm-msg-{mid}" hx-swap="outerHTML" title="Edit">&#x270E;</button>""")
+            if role == "user": acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type": "{self.action_intent_prefix}_msg_retry", "id": "{mid}", "lvl":{self.nesting_level}}}' title='Retry from here'>&#x21BA;</button>""")
+        if can_delete and self.allow_delete and mid:
+            if self.action_intent_prefix: acts.append(f"""<button class="cm-act" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{{"type": "{self.action_intent_prefix}_msg_delete", "id": "{mid}", "lvl":{self.nesting_level}}}' hx-confirm="Delete?" title='Delete'>&#x2715;</button>""")
+            elif self.base_url: acts.append(f"""<button class="cm-act" hx-post="{self.base_url}/msg/delete" hx-vals='{{"id":"{mid}"}}' hx-target="#cm-msg-{mid}" hx-swap="outerHTML" hx-confirm="Delete?" title="Delete">&#x2715;</button>""")
+        acts_html = f'<div class="cm-acts-side">{"".join(acts)}</div>' if acts else ""
+        bwrap = f'<div class="cm-bwrap">{bubble}</div>'
+        if role == "system": return f'<div class="cm-msg cm-sys cm-full" id="cm-msg-{mid}" data-msg-id="{mid}">{bwrap}</div>'
+        avatar = self._avatar_html(display, sprites.get(display,"")) if self.show_avatars else ""
+        role_cls = "cm-me" if is_me else "cm-other"
+        return f'<div class="cm-msg {role_cls}" id="cm-msg-{mid}" data-msg-id="{mid}">{avatar}{bwrap}{acts_html}</div>'
+
+    def _voice_html(self, sid, voice_opts=None) -> str:
+        """Mic controls for the footer. voice_opts tunes call-mode detection per conversation (threshold_db, bargein_db, bargein_ms, min_db, start_ms, end_ms, preroll_ms, min_voiced_ms, voicing, max_ms, echo_margin_db, talkover, echo_route, merge_running, captions, caption_lines); unset keys use the script defaults. The audio intent's owner may push a `cm-voice` trigger {sid, heard} after transcribing: heard=false resumes a reply the utterance paused."""
+        cfg = UI.escape(json.dumps({"sid": sid, "intent": self.audio_intent, "branch": self.branch_id, "lvl": self.nesting_level, **{k: v for k, v in (voice_opts or {}).items() if v not in (None, "")}}))
+        return f"""<button type="button" class="cm-qbtn cm-mic" data-cm-voice="{cfg}" onpointerdown="cmVoice.hold(this, event)" onpointerup="cmVoice.release(this)" onpointerleave="cmVoice.release(this)" onpointercancel="cmVoice.release(this)" oncontextmenu="return false" title="Hold to talk">&#x1F3A4;</button><button type="button" class="cm-qbtn cm-call" data-cm-voice="{cfg}" onpointerdown="cmVoice.toggleCall(this)" title="Call mode: talk hands-free; speaking over a reply interrupts it">&#x260E;</button><button type="button" class="cm-qbtn cm-hush" data-cm-sid="{sid}" onpointerdown="cmVoice.hush(this, event)" title="Stop speaking now and mute replies (the reply is still written); tap again to hear replies">&#x1F50A;</button><span class="cm-vad" id="cm-vad-{sid}"></span>"""
+
+    def _footer_html(self, sid, extra_footer="", voice_opts=None):
+        opts = []
+        if self.stream_toggle: opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="stream" value="1" checked> Stream</label>')
+        if self.think_toggle: opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="think" value="1"> Think</label>')
+        opts.append(f'<label class="cm-opt-lbl"><input type="checkbox" name="render_md" value="1" checked> Fmt</label>')
+        if self.pin_enabled: opts.append(f'<button type="button" class="cm-qbtn cm-pin-on" data-cm-pin="{sid}" title="Pin to bottom">&#x25BC;</button>')
+        opts.append(f"""<button type="button" class="cm-qbtn" onclick="var t=document.getElementById('cm-in-{sid}');if(t)cmCopyText(t.value)" title="Copy input">&#x2398;</button>""")
+        if self.show_export: opts.append(f"""<button type="button" class="cm-qbtn" onclick="cmCopyConversation('{sid}')" title="Copy conversation">&#x1F4E5;</button>""")
+        if self.voice: opts.append(self._voice_html(sid, voice_opts))
+        if extra_footer: opts.append(extra_footer)
+        return f"""<div class="cm-footer">
+                       <form class="cm-form" data-cm-sid="{sid}" hx-post="/im/in" hx-include="this" hx-swap="none">
+                           <input type="hidden" name="type" value="{self.intent_name}">
+                           <input type="hidden" name="branch" value="{self.branch_id}">
+                           <input type="hidden" name="lvl" value="{self.nesting_level}">
+                           <input type="hidden" name="cid" value="{sid}">
+                           <input type="hidden" name="module_intent" value="{self.namespace}">
+                           <textarea id="cm-in-{sid}" name="content" class="cm-input" placeholder="{UI.escape(self.placeholder)}" spellcheck="true"></textarea>
+                           <div class="cm-opts-row">
+                               {"".join(opts)}
+                               <span class="cm-tok-hint" id="cm-tok-{sid}">~0t</span>
+                               <button type="submit" class="cm-send">Send</button>
+                           </div>
+                       </form>
+                   </div>"""
+
+    def working_html(self, sid, stop_intent: dict = None) -> str:
+        """OOB-ready working indicator. stop_intent, if given, is a dict of hx-vals for the stop button (type/branch/lvl/etc) rather than a URL - matches the platform's single-dispatch intent convention instead of each caller needing its own /stop/{sid} route."""
+        stop_btn = f"""<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps(stop_intent)}' style="color:#ff4444;flex-shrink:0;font-size:.75rem" title="Stop">&#x25FC; Stop</button>""" if stop_intent else ""
+        return f'<div id="cm-work-{sid}" class="cm-working cm-on" hx-swap-oob="outerHTML"><span class="spin" style="flex-shrink:0">&#x25CC;</span><span style="flex:1;font-size:.7rem">Working\u2026</span>{stop_btn}</div>'
+
+    def working_hide_html(self, sid) -> str: return f'<div id="cm-work-{sid}" class="cm-working" hx-swap-oob="outerHTML"></div>'
+
+    def _avatar_html(self, name, sprite=""):
+        if sprite: return f'<div class="cm-avatar"><img src="{UI.escape(sprite)}" alt="{UI.escape((name or "?")[0])}"></div>'
+        return f'<div class="cm-avatar">{UI.escape((name or "?")[0].upper())}</div>'
+
+    async def handle_chat_form_submission(self, request, payload: dict, imr: "IMResponse") -> "IMResponse":
+        """Self-contained, runtime handler execution route. Operates agnostically using the IDs provided dynamically by the Interface Bridge form layout extraction."""
+        sid = payload.get("cid") or payload.get("branch")
+        user_input = payload.get("content", "").strip()
+        if not user_input: return imr  # Stop executing early on empty actions
+        working_indicator = self.working_html(sid=sid, stop_url=f"{self.base_url}/msg/stop/{sid}" if self.base_url else "") # Flip on the loader spinner using the instance's own component rendering patterns
+        imr.oob(working_indicator, element_id=f"cm-work-{sid}", swap="outerHTML")
+        is_streaming = payload.get("stream") == "1"
+        wants_thinking = payload.get("think") == "1"
+        if payload.get("element_id"): await push_update(request.state.user.username, element_id=payload.get("element_id"), props={"value": ""}, attrs={"style": "height: auto;"})
+        return imr
+
+    def stream_content_html(self, sid: str, full_content: str, thinking: str = "") -> str:
+        """Generates OOB updates for live streaming content within this manager style."""
+        think_html = f'<div class="cm-stream-think">{UI.escape(thinking)}</div>' if thinking else ""
+        return f'<div id="cm-stream-{sid}" hx-swap-oob="innerHTML">{think_html}<div class="cm-content">{md_plus_transpiler(full_content, mode=self.markdown_mode) if self.markdown else UI.escape(full_content)}</div></div>'
+
+    def stream_clear_html(self, sid: str) -> str: return f'<div id="cm-stream-{sid}" hx-swap-oob="innerHTML"></div>' # Generates an OOB update to wipe out the active stream view element.
+
+    def append_message_html(self, sid: str, message_dict: dict, viewer_name: str = "", user=None) -> str:
+        """Renders a structural message and structures its append position OOB payload."""
+        # Calculate view rules dynamically using manager config flags
+        vname = viewer_name or (user.username if user else "")
+        uname = message_dict.get("user_name","") or message_dict.get("persona_name","")
+        is_me = (uname == vname) if uname else (message_dict.get("role") == "user" and bool(vname))
+        msg_html = self.render_message(message_dict, is_me=is_me, can_edit=is_me, can_delete=True)
+        return f'<div id="cm-msgs-{sid}" hx-swap-oob="beforeend">{msg_html}</div>'
+
+    def append_system_error_html(self, sid: str, error_msg: str) -> str: return f'<div id="cm-msgs-{sid}" hx-swap-oob="beforeend"><div class="cm-sys-error" style="color:#ff5f5f;font-size:.8rem; padding:.2rem .4rem">Error: {UI.escape(error_msg)}</div></div>' # Structures an isolated error report within the message container timeline.
+
+# --- Text File Editor ---
+
+PORTAL_EDITOR_JS = """
+function peInsert(did, before, after, placeholder) {
+    var ta = document.getElementById('doc-textarea-'+did); if (!ta) return;
+    var s = ta.selectionStart, e = ta.selectionEnd;
+    var sel = ta.value.slice(s,e) || placeholder;
+    var text = before + sel + after;
+    ta.value = ta.value.slice(0,s) + text + ta.value.slice(e);
+    ta.selectionStart = s + before.length; ta.selectionEnd = s + before.length + sel.length;
+    ta.focus(); ta.dispatchEvent(new Event('input', {bubbles:true})); ta.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+}
+function peKeydown(e, did) {
+    if ((e.ctrlKey||e.metaKey) && e.key === 's') { e.preventDefault(); var b=document.getElementById('editor-save-btn-'+did); if(b) b.click(); return; }
+    if (e.key === 'Tab') {
+        e.preventDefault();
+        var ta = document.getElementById('doc-textarea-'+did);
+        if (e.shiftKey) peOutdent(did);
+        else if (ta && ta.selectionStart === ta.selectionEnd) peIndentLine(did);
+        else peIndentSelection(did);
+        return;
+    }
+    peAutoIndent(e, did);
+}
+function peIndentSelection(did) {
+    var ta = document.getElementById('doc-textarea-'+did); if (!ta) return;
+    var s = ta.selectionStart, en = ta.selectionEnd;
+    ta.value = ta.value.slice(0,s) + '    ' + ta.value.slice(en);
+    ta.selectionStart = ta.selectionEnd = s + 4;
+    ta.dispatchEvent(new Event('input', {bubbles:true})); ta.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+}
+function peIndentLine(did) {
+    var ta = document.getElementById('doc-textarea-'+did); if (!ta) return;
+    var s = ta.selectionStart, lineStart = ta.value.lastIndexOf('\\n', s-1) + 1;
+    ta.value = ta.value.slice(0, lineStart) + '    ' + ta.value.slice(lineStart);
+    ta.selectionStart = ta.selectionEnd = s + 4;
+    ta.dispatchEvent(new Event('input', {bubbles:true})); ta.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+}
+function peOutdent(did) {
+    var ta = document.getElementById('doc-textarea-'+did); if (!ta) return;
+    var s = ta.selectionStart, lineStart = ta.value.lastIndexOf('\\n', s-1) + 1;
+    var line = ta.value.slice(lineStart);
+    var m = line.match(/^( {1,4}|\\t)/);
+    if (!m) return;
+    var cut = m[0].length;
+    ta.value = ta.value.slice(0, lineStart) + ta.value.slice(lineStart + cut);
+    ta.selectionStart = ta.selectionEnd = Math.max(lineStart, s - cut);
+    ta.dispatchEvent(new Event('input', {bubbles:true})); ta.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+}
+function peAutoIndent(e, did) {
+    if (e.key !== 'Enter') return;
+    var ta = e.target, pos = ta.selectionStart;
+    var lineStart = ta.value.lastIndexOf('\\n', pos-1) + 1;
+    var line = ta.value.slice(lineStart, pos);
+    var m = line.match(/^(\\s*)([-*]\\s\\[[ x]\\]\\s|[-*]\\s|\\d+\\.\\s)/);
+    if (!m) return;
+    e.preventDefault();
+    var indent = m[1], marker = m[2];
+    if (/^\\d+\\.\\s/.test(marker)) marker = (parseInt(marker)+1) + '. ';
+    else if (/\\[[ x]\\]/.test(marker)) marker = marker.replace('[x]','[ ]');
+    var insert = '\\n' + indent + marker;
+    ta.value = ta.value.slice(0,pos) + insert + ta.value.slice(pos);
+    ta.selectionStart = ta.selectionEnd = pos + insert.length;
+    ta.dispatchEvent(new Event('input', {bubbles:true})); ta.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));
+}
+function peDownload(did, filename) {
+    var ta = document.getElementById('doc-textarea-'+did);
+    var content = ta ? ta.value : ((document.getElementById('editor-preview-'+did)||{}).innerText || '');
+    var blob = new Blob([content], {type:'text/plain'});
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename || 'document.txt'; a.click();
+    URL.revokeObjectURL(a.href);
+}
+function pePrint(did) {
+    var prev = document.getElementById('editor-preview-'+did);
+    var titleEl = document.getElementById('doc-title-'+did);
+    var docTitle = titleEl ? titleEl.value : 'Document';
+    var html = prev ? prev.innerHTML : ((document.getElementById('doc-textarea-'+did)||{}).value || '');
+    var w = window.open('', '_blank');
+    var titleNode = w.document.createElement('title');
+    titleNode.textContent = docTitle;
+    w.document.head.appendChild(titleNode);
+    w.document.body.innerHTML = html;
+    w.focus();
+    w.print();
+}
+window.addEventListener('beforeunload', function(e) {
+    if (document.querySelector('.editor-dirty-dot[style*="inline"]')) { e.preventDefault(); e.returnValue = ''; }
+});
+""" + MD_LIVE_OVERLAY_JS + MD_LIVE_EDIT_INIT_JS
+
+class PortalEditor:
+    CSS = """
+    .editor-shell{display:flex; flex-direction:column; height:100%; width:100%; max-width:70rem; margin:0 auto; overflow:hidden; position:relative; background:var(--surface); box-sizing:border-box; transition: max-width 0.2s ease;}
+    .editor-shell.wide-layout{max-width:140rem;}
+    .editor-toolbar{display:flex; align-items:center; gap:0.5rem; padding:0.4rem 0.6rem; border-bottom:var(--border-thick) solid var(--border); background:var(--bg_panel); backdrop-filter:blur(var(--blur)); -webkit-backdrop-filter:blur(var(--blur)); flex-shrink:0; overflow-x:auto; scrollbar-width:none;}
+    .editor-toolbar::-webkit-scrollbar{display:none;}
+    .toolbar-group{display:flex; align-items:center; gap:0.3rem; flex-shrink:0;}
+    .doc-title-input{flex:1; min-width:8rem; background:transparent; border:none; border-bottom:var(--border-thick) solid transparent; color:var(--text); padding:0.2rem 0.4rem; font-family:var(--font-main); font-size:1rem; font-weight:600; outline:none;}
+    .doc-title-input:focus{border-bottom-color:var(--accent);}
+    .editor-dirty-dot{color:#ffaa44;font-size:.7rem;flex-shrink:0;}
+    .editor-content-wrapper{flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden; background:var(--bg);}
+    .editor-main-container{display:flex; flex:1; min-height:0; overflow:hidden; width:100%;}
+    .doc-textarea{flex:1; width:100%; height:100%; background:var(--bg); color:var(--text); border:none; padding:1.2rem; font-family:var(--font-main); line-height:1.7; resize:none; outline:none; box-sizing:border-box; overflow-y:auto;}
+    .doc-textarea.wrapped{white-space:pre-wrap; word-break:break-word;}
+    .doc-textarea.unwrapped{white-space:pre; overflow-x:auto;}
+    .editor-scroll-area{flex:1; overflow-y:auto; padding:1.2rem; min-height:0; background:var(--bg); color:var(--text);}
+    .editor-info-popup{position:absolute; right:0.6rem; top:3rem; z-index:200; max-width:20rem;}
+    .editor-bottombar{border-top:var(--border-thick) solid var(--border); padding:.3rem .5rem; gap:.3rem; flex-wrap:wrap; align-items:center; background:var(--bg_panel); flex-shrink:0;}
+    .search-input-field{background:var(--surface); color:var(--text); border:var(--border-thick) solid var(--border); border-radius:calc(var(--radius)/2); padding:0.3rem 0.5rem; font-family:inherit; outline:none;}
+    .search-input-field:focus{border-color:var(--accent);}
+    """ + MD_BLOCK_CSS + CODE_MIRROR_THEME_CSS + MD_LIVE_CSS + MD_LIVE_EDIT_CSS
+
+    def __init__(self, base_url: str, autosave_delay: str = "2000ms", enable_ai: bool = False, enable_graphviz: bool = True, IM = None, intent_prefix: str = "portal", nesting_level: int = 1, file_manager: "FileManager" = None, get_tab = None, theme: dict = None, render_kwargs_fn = None):
+        self.base_url = base_url.rstrip("/")
+        self.autosave_delay = autosave_delay
+        self.enable_ai = enable_ai
+        self.enable_graphviz = enable_graphviz
+        self.IM = IM
+        self.intent_prefix = intent_prefix
+        self.nesting_level = nesting_level
+        self.fm = file_manager
+        self.get_tab = get_tab
+        self.theme = theme or {}
+        self.render_kwargs_fn = render_kwargs_fn or (lambda: {})
+
+        if self.IM:
+            p = self.intent_prefix
+            self.IM.scripts[f"{p}_save"] = [self._im_save]
+            self.IM.scripts[f"{p}_settings"] = [self._im_settings]
+            self.IM.scripts[f"{p}_preview"] = [self._im_preview]
+            self.IM.scripts[f"{p}_rename"] = [self._im_rename]
+            self.IM.scripts[f"{p}_search_form"] = [self._im_search_form]
+            self.IM.scripts[f"{p}_search_action"] = [self._im_search_action]
+            self.IM.scripts[f"{p}_info"] = [self._im_info]
+            self.IM.scripts[f"{p}_clean"] = [self._im_clean]
+            self.IM.scripts[f"{p}_toggle_task"] = [self._im_toggle_task]
+            self.IM.scripts[f"{p}_delete_task"] = [self._im_delete_task]
+
+    def _settings(self, doc: dict, settings = {}) -> dict:
+        s = doc.get("settings", {})
+        s.update(settings)
+        def _to_bool(v): return v.lower() in ("true", "1", "on") if isinstance(v, str) else bool(v)
+        return {"view": str(s.get("view","edit")), "font": str(s.get("font", "Bitter")), "wrap": _to_bool(s.get("wrap", True)), "zoom": max(0.6, min(float(s.get("zoom", 1.0)), 2.0)), "border": _to_bool(s.get("border", False)), "interactive": _to_bool(s.get("interactive", True)), "live": _to_bool(s.get("live", True))}
+
+    def _get_action_url(self, action_name: str, did: str) -> tuple[str, str]:
+        if self.IM: return "/im/in", f"""hx-vals='{{"type":"{self.intent_prefix}_{action_name}", "branch":"{did}", "lvl":{self.nesting_level}}}'"""
+        return f"{self.base_url}/doc/{action_name}/{did}", ""
+
+    def _action_payload(self, did: str, action: str) -> str: return json.dumps({"type": f"{self.intent_prefix}_{action}", "branch": did, "lvl": self.nesting_level}) if self.IM else "{}" #JSON object literal (JS source) mirroring _get_action_url's hx-vals, for programmatic htmx.ajax() calls.
+
+    def _settings_btn(self, did: str, icon: str, title: str, patch: dict, active: bool = False) -> str:
+        url, vals = self._get_action_url("settings", did)
+        extra = "".join(f', "{k}":{json.dumps(v)}' for k, v in patch.items())
+        vals = vals.replace('}', f'{extra}}}') if self.IM else f"hx-vals='{json.dumps(patch)}'"
+        return f"""<button type="button" class="btn-icon {"active" if active else ""}" title="{title}" hx-post="{url}" {vals} hx-include="#doc-textarea-{did}" hx-target="#editor-shell-{did}" hx-swap="outerHTML">{icon}</button>"""
+
+    def render_shell(self, doc: dict, settings = {}, include_css: bool = True) -> str:
+        did = doc["id"]; s = self._settings(doc, settings)
+        style_tag = f"<style>{self.CSS}</style>" if include_css else ""
+        layout_class = "wide-layout" if s["view"] == "split" else ""
+        border_style = f"""--editor-zoom:{s["zoom"]};{"border:var(--border-thick) solid var(--border);" if s["border"] else ""}"""
+        payload = self._action_payload(did, "toggle_task")
+        toggle_url, _ = self._get_action_url("toggle_task", did)
+        listener_js = f"""<script>(function(){{var el=document.getElementById('editor-shell-{did}');if(el&&!el.dataset.mdTaskBound){{el.dataset.mdTaskBound='1';el.addEventListener('md-task-toggle',function(e){{var v=Object.assign({{}}, {payload},{{idx:e.detail.idx}});htmx.ajax('POST','{toggle_url}',{{target:'#editor-preview-{did}',swap:'innerHTML',values:v}});}});}}}})();</script>"""
+        return f"""{style_tag}
+        		   <div id="editor-shell-{did}" class="editor-shell {layout_class}" style="{border_style}">
+                       {self.toolbar_html(doc, s)}
+                       <div id="editor-info-popup-{did}" class="editor-info-popup"></div>
+                       <div id="editor-help-{did}" class="editor-info-popup" style="display:none">{self.help_html()}</div>
+                       <div id="editor-search-{did}" style="flex-shrink:0;"></div>
+                       <div class="editor-content-wrapper">{self.content_html(doc, s)}</div>
+                       {self.bottom_bar_html(did, s)}
+                   </div>
+                   {listener_js}"""
+
+    def toolbar_html(self, doc: dict, settings: dict) -> str:
+        did = doc["id"]; view, font, wrap, zoom, border = settings["view"], settings["font"], settings["wrap"], settings["zoom"], settings["border"]
+        path = doc.get("path", "")
+        mismatch = bool(path) and Path(path).stem != doc.get("title","").strip()
+        title_style = "border-bottom-color:#ffaa44;" if mismatch else ""
+        title_hint = f"Title differs from filename: {Path(path).name}" if mismatch else ""
+
+        def _tbtn(v, label):
+            url, vals = self._get_action_url("settings", did)
+            val_payload = f', "view":"{v}"' if self.IM else f"""hx-vals='{{"view":"{v}"}}'"""
+            if self.IM: vals = vals.replace('}', f'{val_payload}}}')
+            return f"""<button class="ui-btn {"active" if v == view else ""}" style="padding:0.3rem 0.6rem; font-size:0.85rem;" hx-post="{url}" {vals} hx-include="#doc-textarea-{did}" hx-target="#editor-shell-{did}" hx-swap="outerHTML">{label}</button>"""
+        url_rename, vals_rename = self._get_action_url("rename", did)
+        url_search, vals_search = self._get_action_url("search_form", did)
+        url_info, vals_info = self._get_action_url("info", did)
+        url_save, vals_save = self._get_action_url("save", did)
+        url_clean, vals_clean = self._get_action_url("clean", did)
+        ai_btn = ""
+        if self.enable_ai:
+            url_ai, vals_ai = self._get_action_url("apply_ai", did)
+            ai_btn = f"""<button class="btn-icon" title="Apply last AI response" hx-post="{url_ai}" {vals_ai} hx-target="#editor-shell-{did}" hx-swap="outerHTML">AI&#x27F3;</button>"""
+        save_btn = f"""<button id="editor-save-btn-{did}" class="btn-icon" title="Force save now (Ctrl+S)" hx-post="{url_save}" {vals_save} hx-include="#doc-textarea-{did}" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-on::before-request="var ta=document.getElementById('doc-textarea-{did}');if(ta&&ta.cm)ta.cm.save()" hx-on::after-request="var ok=event.detail.successful;this.innerHTML=ok?'&#x2713;':'&#x26A0;';this.title=ok?'Saved':'Save failed - see the server log';if(ok)document.getElementById('editor-dirty-{did}').style.display='none';var b=this;setTimeout(function(){{b.innerHTML='&#x1F4BE;';b.title='Force save now (Ctrl+S)'}},1500)">&#x1F4BE;</button>"""
+        clean_btn = f"""<button class="btn-icon" title="Strip corrupted/double-encoded characters from source" hx-post="{url_clean}" {vals_clean} hx-include="#doc-textarea-{did}" hx-target="#editor-clean-sink-{did}" hx-swap="innerHTML">&#x1F9F9;</button>"""
+        bottombar_toggle = f"""<button type="button" class="btn-icon" title="Quick-insert toolbar / interactive view" onclick="var b=document.getElementById('editor-bottombar-{did}');b.style.display=b.style.display==='none'?'flex':'none'">&#x2295;</button>"""
+        help_btn = f"""<button type="button" class="btn-icon" title="What do these icons do?" onclick="var h=document.getElementById('editor-help-{did}');h.style.display=h.style.display==='none'?'block':'none'">?</button>"""
+        download_btn = f"""<button type="button" class="btn-icon" title="Download" onclick="peDownload('{did}','{UI.escape(Path(path).name or (doc.get('title','document') + '.md'))}')">&#x2B07;</button>"""
+        print_btn = f"""<button type="button" class="btn-icon" title="Print" onclick="pePrint('{did}')">&#x1F5A8;</button>"""
+        return f"""<div class="editor-toolbar">
+                       <input id="doc-title-{did}" type="text" value="{UI.escape(doc.get("title",""))}" name="value" hx-post="{url_rename}" {vals_rename} hx-trigger="change" hx-target="#doc-title-{did}" hx-swap="outerHTML" hx-include="this" class="doc-title-input" style="{title_style}" title="{title_hint}">
+                       <span id="editor-dirty-{did}" class="editor-dirty-dot" style="display:none" title="Unsaved changes">&#x25CF;</span>
+                       <div class="toolbar-group">{_tbtn("edit","Edit")}{_tbtn("preview","Preview")}{_tbtn("split","Split")}</div>
+                       <div class="toolbar-group">
+                           {self._settings_btn(did, "&#x2212;", "Zoom out", {"zoom": round(zoom-0.1,2)})}
+                           <span style="font-size:.68rem;color:var(--text_muted);min-width:2.4rem;text-align:center">{round(zoom*100)}%</span>
+                           {self._settings_btn(did, "&#x2b;", "Zoom in", {"zoom": round(zoom+0.1,2)})}
+                           {self._settings_btn(did, "&#x21AA;", "Toggle word wrap", {"wrap": not wrap}, active=wrap)}
+                           {self._settings_btn(did, "Aa" if font=="mono" else "Tt", "Toggle font style", {"font": "prose" if font=="mono" else "mono"})}
+                           {self._settings_btn(did, "&#x25A2;", "Toggle boundary border", {"border": not border}, active=border)}
+                           {self._settings_btn(did, "&#x270E;", "Toggle live formatting in the editor", {"live": not settings["live"]}, active=settings["live"])}
+                           <button class="btn-icon" title="Search within document" hx-post="{url_search}" {vals_search} hx-target="#editor-search-{did}" hx-swap="innerHTML">&#x1F50D;</button>
+                           <button class="btn-icon" title="Document statistics (press again to close)" hx-post="{url_info}" {vals_info} hx-target="#editor-info-popup-{did}" hx-swap="innerHTML" hx-on::before-request="var p=document.getElementById('editor-info-popup-{did}');if(p.innerHTML.trim()){{p.innerHTML='';event.preventDefault();}}">&#x2139;</button>
+                           {clean_btn}{save_btn}{download_btn}{print_btn}{bottombar_toggle}{help_btn}{ai_btn}
+                       </div>
+                       <span id="editor-clean-sink-{did}" style="display:none"></span>
+                   </div>"""
+
+    def quick_insert_bar_html(self, did: str) -> str:
+        btns = [("B","**","**","bold","font-weight:700"), ("I","*","*","italic","font-style:italic"), ("H","# ","","Heading",""), ("Link","[","](url)","label",""), ("Code","`","`","code",""), ("[ ]","- [ ] ","","task",""), ("Quote","> ","","quote",""), ("Table","| col | col |\n|---|---|\n| ","| |","",""), ("DOT","```dot\ndigraph G {\n  A -> B;\n}\n```","","","")]
+        html_ = "".join(f"""<button type="button" class="btn-icon" style="font-size:.7rem;{st}" title="Insert {UI.escape(lbl)}" onclick="peInsert('{did}',{json.dumps(b)},{json.dumps(a)},{json.dumps(ph)})">{lbl}</button>""" for lbl,b,a,ph,st in btns)
+        html_ += f"""<button type="button" class="btn-icon" style="font-size:.7rem" title="Indent" onclick="peIndentLine('{did}')">&#x21E5;</button>
+                     <button type="button" class="btn-icon" style="font-size:.7rem" title="Outdent" onclick="peOutdent('{did}')">&#x21E4;</button>"""
+        return html_
+
+    def bottom_bar_html(self, did: str, settings: dict) -> str:
+        view = settings["view"]
+        interactive_btn = self._settings_btn(did, "&#x1F517;", "Toggle clickable checkboxes in preview", {"interactive": not settings.get("interactive", False)}, active=settings.get("interactive", False)) if view != "edit" else ""
+        quick = self.quick_insert_bar_html(did) if view != "preview" else ""
+        return f"""<div id="editor-bottombar-{did}" class="editor-bottombar" style="display:none;">{interactive_btn}{quick}</div>"""
+
+    def help_html(self) -> str:
+        items = [("&#x1F4BE;","Save now"), ("&#x1F9F9;","Clean corrupted characters"), ("&#x2B07;","Download"), ("&#x1F5A8;","Print"), ("&#x2212;/&#x2b;","Zoom"), ("&#x21AA;","Word wrap"), ("Aa/Tt","Font style"), ("&#x25A2;","Boundary border"),("&#x1F50D;","Search"), ("&#x2139;","Document info"), ("&#x2295;","Quick-insert / interactive toolbar"), ("&#x1F517;","Clickable checkboxes (view mode)"), ("&#x21E5;/&#x21E4;","Indent / outdent current line"), ("&#x270E;","Live formatting in the editor")]
+        rows = "".join(f'<div style="display:flex;gap:.5rem;padding:.15rem 0"><span style="min-width:2.2rem">{i}</span><span style="color:var(--text_muted)">{UI.escape(l)}</span></div>' for i,l in items)
+        return f"""<div class="glass" style="padding:.6rem .8rem;font-size:.75rem"><div style="font-weight:600;margin-bottom:.3rem">Toolbar Icons</div>{rows}<button type="button" class="ui-btn" style="width:100%;margin-top:.5rem;justify-content:center" onclick="this.closest('.editor-info-popup').style.display='none'">Close</button></div>"""
+        
+    def render_preview(self, content: str, zoom: float = 1.0, **kwargs) -> str:
+        kwargs.setdefault("code_mirror", True)
+        kwargs.setdefault("enable_graphviz", self.enable_graphviz)
+        kwargs.setdefault("theme", self.theme)
+        rendered = md_plus_transpiler(content, **kwargs)
+        return self._wrap_zoom(rendered, zoom)
+
+    def _wrap_zoom(self, html_: str, zoom: float) -> str:
+        if not zoom or abs(zoom - 1.0) < 0.001: return html_
+        return f'<div style="transform:scale({zoom});transform-origin:top left;width:{100/zoom:.4f}%;">{html_}</div>'
+
+    def content_html(self, doc: dict, settings: dict) -> str:
+        did = doc["id"]
+        view, font, wrap, zoom = settings.get("view", 1), settings["font"], settings["wrap"], settings.get("zoom", 1)
+        content_val = UI.escape(doc.get("content", "")); wrap_class = "wrapped" if wrap else "unwrapped"
+        font_size = f"font-size:calc(0.95rem * {zoom})"
+        url_save, vals_save = self._get_action_url("save", did)
+        dirty_js = f"document.getElementById('editor-dirty-{did}').style.display='inline'"
+        clean_js = f"document.getElementById('editor-dirty-{did}').style.display='none'"
+        textarea = f"""<textarea id="doc-textarea-{did}" name="content" class="doc-textarea {wrap_class}" style="{font_size}" data-live="{1 if settings["live"] else 0}" oninput="{dirty_js}" onkeydown="peKeydown(event,'{did}')" hx-post="{url_save}" {vals_save} hx-trigger="keyup changed delay:{self.autosave_delay}, blursave" hx-target="#editor-autosave-{did}" hx-swap="innerHTML" hx-include="this" hx-on::after-request="{clean_js}">{content_val}</textarea><span id="editor-autosave-{did}" style="display:none"></span>"""
+        rendered_preview = self.render_preview(doc.get("content",""), zoom = zoom, task_interactive = settings.get("interactive", False), doc_id=did, path=doc.get("path",""), **self.render_kwargs_fn())
+        if self.IM:
+            preview = f"""<div id="editor-preview-{did}" class="editor-scroll-area font-{font}">{rendered_preview}</div>"""
+        else:
+            url_prev, vals_prev = self._get_action_url("preview", did)
+            preview = f"""<div id="editor-preview-{did}" class="editor-scroll-area font-{font}" hx-post="{url_prev}" {vals_prev} hx-trigger="keyup changed delay:{self.autosave_delay} from:#doc-textarea-{did}" hx-target="this" hx-swap="innerHTML" hx-include="#doc-textarea-{did}">{rendered_preview}</div>"""
+        if view == "preview": return f'<div class="editor-main-container">{preview}</div>'
+        if view == "split": return f'<div class="editor-main-container" style="flex-direction:row;"><div style="flex:1; display:flex; min-width:0; border-right:var(--border-thick) solid var(--border);">{textarea}</div><div style="flex:1; display:flex; min-width:0;">{preview}</div></div>'
+        return f'<div class="editor-main-container">{textarea}</div>'
+
+    def info_html(self, doc: dict) -> str:
+        c = doc.get("content",""); lines = c.count("\n") + 1; sz = len(c.encode("utf-8"))
+        size_str = f"{sz/1024:.1f} KB" if sz > 1024 else f"{sz} B"
+        return f"""<div class="glass" style="padding:0.6rem 0.8rem; font-size:0.75rem;">
+                       <div style="color:var(--text_muted); font-size:0.65rem; text-transform:uppercase; margin-bottom:0.3rem; font-weight:700;">Info</div>
+                       <div style="display:grid; grid-template-columns:auto 1fr; gap:0.2rem 0.75rem;">
+                           <span style="color:var(--text_muted)">Words</span><span>{len(c.split()):,}</span>
+                           <span style="color:var(--text_muted)">Lines</span><span>{lines:,}</span>
+                           <span style="color:var(--text_muted)">~Tokens</span><span>~{max(1, len(c) // 4):,}</span>
+                           <span style="color:var(--text_muted)">Size</span><span>{size_str}</span>
+                           <span style="color:var(--text_muted)">Saved</span><span>{doc.get("modified", "")[:16].replace("T"," ") or "unsaved"}</span>
+                       </div>
+                       <button type="button" class="ui-btn" style="width:100%; margin-top:0.5rem; padding:0.2rem; font-size:0.7rem; justify-content:center;" onclick="this.closest('.editor-info-popup').innerHTML=''">Close</button>
+                   </div>"""
+                       
+    def search_form_html(self, did: str) -> str:
+        url_search, vals_search = self._get_action_url("search_action", did)
+        return f"""<form style="display:flex; align-items:center; gap:0.4rem; padding:0.4rem 0.8rem; border-bottom:var(--border-thick) solid var(--border); background:var(--surface);" hx-post="{url_search}" {vals_search} hx-target="#editor-search-results-{did}" hx-swap="innerHTML">
+                       <input type="text" name="query" placeholder="Search document..." class="search-input-field" style="flex:1; font-size:0.85rem;" autofocus>
+                       <label style="display:flex; align-items:center; gap:0.2rem; font-size:0.75rem; white-space:nowrap; flex-shrink:0; color:var(--text_muted);"><input type="checkbox" name="regex" value="1"> Regex</label>
+                       <button type="submit" class="btn-icon" style="font-size:0.85rem">&#x1F50D;</button>
+                       <button type="button" class="btn-icon" onclick="document.getElementById('editor-search-{did}').innerHTML=''">&#x2715;</button>
+                   </form>
+                   <div id="editor-search-results-{did}" style="max-height:12rem; overflow-y:auto; background:var(--bg);"></div>"""
+
+    def search_results_html(self, doc: dict, query: str, use_regex: bool = False) -> str:
+        content = doc.get("content","")
+        if not query: return '<div style="font-size:0.75rem; color:var(--text_muted); padding:0.4rem 0.8rem">Enter a search term</div>'
+        try:
+            pattern = query if use_regex else re.escape(query)
+            matches = list(re.finditer(pattern, content, 0 if use_regex else re.IGNORECASE))
+        except Exception as e: return f'<div style="font-size:0.75rem; color:#ff5f5f; padding:0.4rem 0.8rem">Regex error: {UI.escape(str(e))}</div>'
+        if not matches: return f'<div style="font-size:0.75rem; color:var(--text_muted); padding:0.4rem 0.8rem">No matches for &ldquo;{UI.escape(query)}&rdquo;</div>'
+        rows = ""
+        for m in matches[:50]:
+            start = max(0, m.start()-55); end = min(len(content), m.end()+55)
+            pre, hit, post = UI.escape(content[start:m.start()]), UI.escape(m.group()), UI.escape(content[m.end():end])
+            line = content[:m.start()].count("\n") + 1
+            rows += f"""<div style="padding:0.3rem 0.8rem; border-bottom:var(--border-thick) solid var(--border); font-size:0.75rem; font-family:var(--font-mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"><span style="color:var(--text_muted)">L{line}: </span>{pre}<mark style="background:var(--accent_dim); color:var(--accent); padding:0.05rem 0.15rem; border-radius:0.2rem;">{hit}</mark>{post}</div>"""
+        count = f'{len(matches)} match{"es" if len(matches)!=1 else ""}' + (" (first 50 shown)" if len(matches) > 50 else "")
+        return f"""<div style="padding:0.3rem 0.8rem; font-size:0.8rem; color:var(--text_muted); background:var(--bg_panel); border-bottom:var(--border-thick) solid var(--border); font-weight:600;">{count}</div>{rows}"""
+
+    async def _get_doc_from_state(self, request, payload) -> dict:
+        did = payload.get("branch", "default")
+        if self.fm and self.get_tab:
+            tab = await self.get_tab(request, did)
+            if tab and tab.get("path"):
+                try: content = self.fm.read(tab["path"])
+                except Exception: content = payload.get("content", "")
+                return {"id": did, "title": tab.get("label", "Untitled"), "content": content, "settings": tab.get("settings", {}), "path": tab["path"]}
+        return {"id": did, "title": payload.get("title", "Untitled"), "content": payload.get("content", ""), "settings": payload.get("settings", {})}
+
+    async def _im_save(self, request, payload, imr):
+        did = payload.get("branch", "default")
+        content = payload.get("content", "")
+        if self.fm and self.get_tab:
+            tab = await self.get_tab(request, did)
+            if tab and tab.get("path"):
+                try:
+                    self.fm.write(tab["path"], content)
+                    s = tab.get("settings", {})
+                    rendered = self.render_preview(content, zoom=s.get("zoom",1.0), task_interactive=s.get("interactive",False), doc_id=did, path=tab["path"], **self.render_kwargs_fn())
+                    imr.oob(rendered, f"editor-preview-{did}")
+                    return imr.raw('<span style="color:var(--accent);font-size:.7rem">&#x2713;</span>')
+                except Exception as e:
+                    return imr.raw(f'<span style="color:#ff5f5f;font-size:.7rem">&#x26A0; {UI.escape(str(e))}</span>')
+        return imr.raw("")
+
+    async def _im_clean(self, request, payload, imr):
+        """Replaces the editor text with clean_text() of it and saves; the info popup says how many characters changed (nothing is saved when nothing changed)."""
+        did, before = payload.get("branch", "default"), payload.get("content", "")
+        cleaned = clean_text(before)
+        changed = sum(a != b for a, b in zip(before, cleaned)) + abs(len(before) - len(cleaned))
+        note = f"""<div class="glass" style="padding:.5rem .8rem;font-size:.75rem">{"&#x2713; Cleaned - " + str(changed) + " character(s) changed, saved." if changed else "Nothing to clean - no corrupted characters found."}<button type="button" class="ui-btn" style="width:100%;margin-top:.4rem;justify-content:center;font-size:.7rem" onclick="this.closest('.editor-info-popup').innerHTML=''">Close</button></div>"""
+        imr.oob(note, f"editor-info-popup-{did}")
+        if not changed: return imr.raw("")
+        return imr.raw(f"""<script>(function(){{var ta=document.getElementById("doc-textarea-{did}");if(!ta)return;var v={json.dumps(cleaned)};if(ta.cm)ta.cm.setValue(v);else ta.value=v;htmx.trigger(ta,"blursave");}})();</script>""")
+    
+    async def _im_settings(self, request, payload, imr):
+        doc = await self._get_doc_from_state(request, payload)
+        current_settings = doc.get("settings", {})
+        for k in ("view","wrap","font","zoom","border","interactive","live"):
+            if k in payload: current_settings[k] = payload[k]
+        doc["settings"] = current_settings
+        if "content" in payload and self.fm and self.get_tab:
+            tab = await self.get_tab(request, payload.get("branch", "default"))
+            if tab and tab.get("path"):
+                try: self.fm.write(tab["path"], payload["content"]); doc["content"] = payload["content"]
+                except Exception: pass
+        return imr.raw(self.render_shell(doc, include_css=False))
+
+    async def _im_preview(self, request, payload, imr):
+        doc = await self._get_doc_from_state(request, payload)
+        zoom = doc.get("settings", {}).get("zoom", 1.0)
+        return imr.raw(self.render_preview(payload.get("content", ""), zoom=zoom, path=doc.get("path",""), **self.render_kwargs_fn()))
+
+    async def _im_rename(self, request, payload, imr): return imr.raw(f'<input id="doc-title-{payload.get("branch")}" type="text" value="{UI.escape(payload.get("value", "Untitled"))}" name="value" class="doc-title-input">')
+    async def _im_search_form(self, request, payload, imr): return imr.raw(self.search_form_html(payload.get("branch")))
+
+    async def _im_search_action(self, request, payload, imr):
+        doc = await self._get_doc_from_state(request, payload)
+        return imr.raw(self.search_results_html(doc, payload.get("query", ""), str(payload.get("regex", "")).lower() in ("true","1","on")))
+
+    async def _im_info(self, request, payload, imr): return imr.raw(self.info_html(await self._get_doc_from_state(request, payload)))
+
+    @staticmethod
+    def _flip_task(content: str, idx: int) -> str:
+        counter = [0]
+        def _flip(m):
+            if counter[0] == idx:
+                counter[0] += 1
+                new_state = "x" if m.group(2).strip() == "" else " "
+                return f"{m.group(1)}[{new_state}]{m.group(3)}"
+            counter[0] += 1
+            return m.group(0)
+        return re.sub(r'^(\s*(?:[-*+]|\d+\.)\s+)\[([ xX])\](.*)$', _flip, content, flags=re.M)
+
+    @staticmethod
+    def _delete_task(content: str, idx: int) -> str:
+        counter = [0]; pat = re.compile(r'^\s*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+.*$'); out = []
+        for line in content.split("\n"):
+            if pat.match(line):
+                if counter[0] == idx: counter[0] += 1; continue
+                counter[0] += 1
+            out.append(line)
+        return "\n".join(out)
+
+    async def _im_delete_task(self, request, payload, imr):
+        doc = await self._get_doc_from_state(request, payload)
+        new_content = self._delete_task(doc.get("content",""), int(payload.get("idx", -1)))
+        if self.fm and self.get_tab:
+            tab = await self.get_tab(request, doc["id"])
+            if tab and tab.get("path"): self.fm.write(tab["path"], new_content)
+        zoom = doc.get("settings", {}).get("zoom", 1.0)
+        return imr.raw(self.render_preview(new_content, zoom=zoom, task_interactive=True, doc_id=doc["id"], path=doc.get("path",""), **self.render_kwargs_fn()))
+
+    async def _im_toggle_task(self, request, payload, imr):
+        doc = await self._get_doc_from_state(request, payload)
+        new_content = self._flip_task(doc.get("content",""), int(payload.get("idx", -1)))
+        if self.fm and self.get_tab:
+            tab = await self.get_tab(request, doc["id"])
+            if tab and tab.get("path"): self.fm.write(tab["path"], new_content)
+        doc["content"] = new_content
+        zoom = doc.get("settings", {}).get("zoom", 1.0)
+        return imr.raw(self.render_preview(new_content, zoom=zoom, task_interactive=True, doc_id=doc["id"], path=doc.get("path",""), **self.render_kwargs_fn()))
+
+# --- Settings Manager (Strictly Agnostic) ---
+
+class SettingField:
+    def __init__(self, name, label, type="text", default=None, options=None, hint="", hx_intent=None, hx_target=None, step=None, min=None, max=None, advanced=False, hx_get = None):
+        self.name, self.label, self.type = name, label, type
+        self.default = default if default is not None else ({} if type == "json" else "")
+        self.hx_intent = hx_intent
+        self.options, self.hint, self.hx_get, self.hx_target = options if options is not None else [], hint, hx_get, hx_target
+        self.step = step if step is not None else ("any" if (isinstance(default, float) or default is None) else 1)
+        self.min, self.max = min, max
+        self.advanced = advanced
+
+    def get_options(self, values=None):
+        if callable(self.options):
+            try: return self.options(values)
+            except TypeError: return self.options()
+        return self.options
+
+class SettingsError(ValueError): """A form value that cannot be stored as its field's type - raised instead of silently storing the default."""
+    
+class SettingsGroup:
+    def __init__(self, name, label, fields, json_path):
+        self.name = name
+        self.label = label
+        self.fields = fields
+        self.json_path = Path(json_path)
+
+    def load(self) -> dict:
+        if not self.json_path.exists(): return {f.name: f.default for f in self.fields}
+        try:
+            with open(self.json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return {f.name: data.get(f.name, f.default) for f in self.fields}
+        except Exception:
+            return {f.name: f.default for f in self.fields}
+
+    def save(self, form_data: dict):
+        self.json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.json_path, 'w', encoding='utf-8') as f:
+            json.dump(self.parse(form_data), f, indent=2)
+
+    def parse(self, form_data: dict, name_prefix: str = "") -> dict:
+        """Form values -> typed settings dict (checkbox -> bool, number -> int/float, json -> dict/list), the same rules save() persists with. For callers that store settings somewhere other than this group's own json_path."""
+        data = {}
+        for f in self.fields:
+            raw = form_data.get(f"{name_prefix}{f.name}")
+            if f.type == "checkbox":
+                data[f.name] = bool(raw)
+            elif f.type == "number":
+                try:
+                    v = float(raw) if raw not in (None, "") else f.default
+                    data[f.name] = int(v) if f.step == 1 else v
+                except Exception: data[f.name] = f.default
+            elif f.type == "json":
+                if isinstance(raw, (dict, list)): data[f.name] = raw
+                elif raw and raw.strip():
+                    try: data[f.name] = json.loads(raw)
+                    except ValueError as e: raise SettingsError(f"""{f.label}: not valid JSON ({e})""") from e
+                else: data[f.name] = f.default
+            else:
+                data[f.name] = raw if raw is not None else f.default
+        return data
+
+    def _render_field(self, f, values: dict, fm=None, name_prefix: str = "") -> str:
+        val = values.get(f.name, f.default)
+        hint = f'<div style="font-size:.6rem;color:var(--text_muted)">{html.escape(f.hint)}</div>' if f.hint else ""
+        tgt = 'hx-swap="none"' if f.hx_target == "none" else f'''hx-target="{f.hx_target}"'''   # "none": the intent answers with OOB swaps only, so there is no main swap to empty its target
+        hx_attr = f""" hx-post="/im/in" hx-vals='{{"type":"{f.hx_intent}"}}' {tgt} hx-trigger="change" hx-include='closest form'""" if (f.hx_intent and f.hx_target) else ""        
+        fname = f"{name_prefix}{f.name}"
+        if f.type == "select":
+            opts = "".join(f'<option value="{html.escape(str(v))}" {"selected" if str(val)==str(v) else ""}>{html.escape(str(l))}</option>' for v,l in ((o if isinstance(o,(tuple,list)) else (o,o)) for o in f.get_options(values)))
+            select_html = f'<select name="{fname}"{hx_attr} class="module-select" style="width:100%">{opts}</select>'
+            return (f'<label style="display:block;margin-bottom:1rem" id="{name_prefix}{f.name}_wrap">{html.escape(f.label)}{hint}{select_html}</label>' if f.name == "model" else f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}{select_html}</label>')
+        if f.type == "number":
+            attrs = f' step="{f.step}"' + (f' min="{f.min}"' if getattr(f,"min",None) is not None else "") + (f' max="{f.max}"' if getattr(f,"max",None) is not None else "")
+            return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="number" name="{fname}" value="{val if val is not None else ""}"{attrs} class="module-select" style="width:100%"{hx_attr}></label>'
+        if f.type == "checkbox":
+            return f'<label style="display:block;margin-bottom:1rem"><input type="checkbox" name="{fname}" value="1" {"checked" if val else ""}{hx_attr}> {html.escape(f.label)}{hint}</label>'
+        if f.type == "json":
+            val_str = json.dumps(val, indent=2) if isinstance(val, dict) else str(val)
+            return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%;font-family:monospace" rows="4">{html.escape(val_str)}</textarea></label>'
+        if f.type == "file_picker":
+            input_id = f"fp-{fname}-{id(self)}"
+            picker_html = fm.folder_picker_html(selected=str(val), wire_to_input_id=input_id) if fm else '<i style="color:var(--text_muted)">No file manager context</i>'
+            return f'<div style="margin-bottom:1rem"><label>{html.escape(f.label)}{hint}</label><input type="text" id="{input_id}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%;font-family:monospace"><div style="max-height:8rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.2rem;margin-top:.2rem">{picker_html}</div></div>'
+        if f.type == "textarea":
+            return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<textarea name="{fname}"{hx_attr} class="cm-input" style="width:100%" rows="4">{html.escape(str(val))}</textarea></label>'
+        return f'<label style="display:block;margin-bottom:1rem">{html.escape(f.label)}{hint}<input type="{f.type}" name="{fname}" value="{html.escape(str(val))}" class="module-select" style="width:100%"{hx_attr}></label>'
+
+    def render(self, values: dict, fm=None, name_prefix: str = "") -> str:
+        primary = [f for f in self.fields if not getattr(f, "advanced", False)]
+        advanced = [f for f in self.fields if getattr(f, "advanced", False)]
+        out = "".join(self._render_field(f, values, fm, name_prefix) for f in primary)
+        if advanced:
+            out += (f"""<details style="margin-top:.3rem;margin-bottom:.5rem">
+                            <summary style="cursor:pointer;font-size:.72rem;color:var(--text_muted);list-style:none;user-select:none">&#x25B8; Advanced ({len(advanced)})</summary>
+                            <div style="margin-top:.5rem;padding-left:.6rem;border-left:var(--border-thick) solid var(--border)">{"".join(self._render_field(f, values, fm, name_prefix) for f in advanced)}</div>
+                        </details>""")
+        return out
+
+class SettingsPanel:
+    def __init__(self, title, groups):
+        self.title = title; self.groups = groups
+    def get(self, key, default=None):
+        for g in self.groups:
+            data = g.load()
+            if key in data: return data[key]
+        return default
+    def get_all(self): return {g.name: g.load() for g in self.groups}
+    def get_group(self, name): return next((g for g in self.groups if g.name == name), None)
+    def page_shell(self, body_html: str, close_url: str = "", target_id: str = "", title: str = None) -> str:
+        return f"""<div style="padding:1rem; max-width:40rem; position:relative; height:100%; overflow-y:auto; box-sizing:border-box">
+                       {f'<button type="button" class="close-btn" style="position:absolute;top:2rem; right:2rem" hx-get="{close_url}" hx-target="#{target_id}" hx-swap="innerHTML">&#x2715;</button>' if (close_url and target_id) else ""}
+                       <h2 style="margin:0 0 1rem; font-size:1rem">{UI.escape(title or self.title)}</h2>
+                       {body_html}
+                    </div>"""
+
+# --- Tagged Text ---
+# Model output may carry a few known tags: <lang code="xx">...</lang> speaks the text inside with that language's voice; whitelisted action tags (e.g. <remember>...</remember>, <sample name="..."/>) are instructions for a module, never spoken or shown.
+# tag_at reads one tag at the start of a string, so a streaming reader can wait while a tag is still arriving; parse_tagged reads a whole text.
+
+_TAG_RE = re.compile(r"""<(/?)([A-Za-z][\w-]*)((?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>/]+))*)\s*(/?)>""")
+_TAG_ATTR_RE = re.compile(r"""([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+))""")
+_TAG_PARTIAL_RE = re.compile(r"""</?(?:[A-Za-z][\w-]*(?:\s[^<>]*)?)?""")
+
+def tag_at(text: str, names) -> tuple:
+    """(tag, length) when text starts with a tag named in names: tag = {name, close, attrs, body}; an opening action tag includes its body up to the closing tag.
+    (None, 0) = a known tag may still be arriving (wait for more text); (None, -1) = not a known tag, so the "<" is ordinary text."""
+    m = _TAG_RE.match(text)
+    if not m: return (None, 0) if len(text) < 200 and _TAG_PARTIAL_RE.fullmatch(text) else (None, -1)
+    name = m.group(2).lower()
+    if name not in names: return None, -1
+    tag = {"name": name, "close": m.group(1) == "/", "attrs": {k: a or b or c for k, a, b, c in _TAG_ATTR_RE.findall(m.group(3))}, "body": ""}
+    if tag["close"] or m.group(4) or name == "lang": return tag, m.end()
+    j = text.lower().find(f"</{name}>", m.end())
+    if j < 0: return None, 0
+    return {**tag, "body": text[m.end():j].strip()}, j + len(name) + 3
+
+def parse_tagged(text: str, action_names) -> dict:
+    """Whole-text reading: {"runs": [(lang, text), ...] in order (lang "" = the default voice), "actions": [{name, attrs, body}], "plain": the text without any known tag}. An unfinished tag at the end is dropped."""
+    names, runs, actions, lang, cur, plain, rest = {str(n).lower() for n in action_names} | {"lang"}, [], [], "", "", "", str(text)
+    while rest:
+        i = rest.find("<")
+        if i < 0: cur += rest; break
+        cur, rest = cur + rest[:i], rest[i:]
+        tag, n = tag_at(rest, names)
+        if n == 0: break
+        if n < 0: cur, rest = cur + "<", rest[1:]; continue
+        rest = rest[n:]
+        if tag["name"] == "lang":
+            if cur.strip(): runs.append((lang, cur.strip()))
+            plain, cur, lang = plain + cur, "", "" if tag["close"] else str(tag["attrs"].get("code", "")).lower()
+        elif not tag["close"]: actions.append({k: tag[k] for k in ("name", "attrs", "body")})
+    if cur.strip(): runs.append((lang, cur.strip()))
+    return {"runs": runs, "actions": actions, "plain": re.sub(r"[ \t]{2,}", " ", plain + cur).strip()}    
+    
+# --- Data Bundles (backup and transfer between portal instances) ---
+# A module declares parts {name: (label, export_fn(username, ctx) -> data, import_fn(username, ctx, data, replace) -> note)}; DataBundle renders the controls and handles both directions through intents.
+# Export answers with a download link (data URL), so no route is needed. Import reads the chosen file in the browser into a form field, writes a backup bundle of the chosen parts, then applies them part by part.
+# ctx is whatever the module needs to locate its data (e.g. {"sid": ...}); it rides in the intents as JSON.
+
+DATA_BUNDLE_CSS = """
+.bundle-row{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:.25rem 0;}
+"""
+
+DATA_BUNDLE_JS = r"""
+function bundleFileToField(input){ var f = input.files && input.files[0], field = input.form.querySelector('[name=bundle]'); if (!f) return; var r = new FileReader(); r.onload = function(){ field.value = r.result; }; r.readAsText(f); }
+"""
+
+class DataBundle:
+    """Bundle file: {"kind": "portal-bundle:<name>", "version": 1, "created", "from", "parts": {part: data}}. on_import(request, ctx, imr) lets the module re-render after an import."""
+    def __init__(self, name: str, IM, parts: dict, backup_dir, nesting_level: int = 2, on_import=None):
+        self.name, self.IM, self.parts, self.backup_dir, self.lvl, self.on_import = name, IM, parts, Path(backup_dir), nesting_level, on_import
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        IM.scripts.update({f"{name}_bundle_export": [self._im_export], f"{name}_bundle_import": [self._im_import]})
+
+    def _vals(self, action: str, ctx: dict) -> str: return json.dumps({"type": f"{self.name}_bundle_{action}", "lvl": self.lvl, "ctx": json.dumps(ctx)})
+    def _chosen(self, payload) -> list: v = payload.get("parts", []); return [p for p in (v if isinstance(v, list) else [v]) if p in self.parts]
+    def _bundle(self, username: str, ctx: dict, parts: list) -> dict: return {"kind": f"portal-bundle:{self.name}", "version": 1, "created": datetime.utcnow().isoformat(), "from": username, "parts": {p: self.parts[p][1](username, ctx) for p in parts}}
+
+    def panel_html(self, ctx: dict) -> str:
+        checks = "".join(f"""<label class="status-label"><input type="checkbox" name="parts" value="{k}" checked> {v[0]}</label>""" for k, v in self.parts.items())
+        return f"""<form class="bundle-row" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{self._vals("export", ctx)}' hx-include="this">{checks}<button type="submit" class="ui-btn">Export</button><span id="{self.name}-bundle-link"></span></form>
+                   <form class="bundle-row" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{self._vals("import", ctx)}' hx-include="this" hx-confirm="Import this bundle? A backup of the chosen parts is saved first.">{checks}<select name="mode"><option value="merge">Merge into current</option><option value="replace">Replace current</option></select><input type="file" accept=".json" onchange="bundleFileToField(this)"><input type="hidden" name="bundle"><button type="submit" class="ui-btn">Import</button></form>
+                   <div id="{self.name}-bundle-status" class="status-label">Import first saves a backup bundle of the chosen parts, so it can be undone by importing that file.</div>"""
+
+    async def _im_export(self, request, payload, imr):
+        username, ctx = request.state.user.username, json.loads(payload.get("ctx") or "{}")
+        data = base64.b64encode(json.dumps(self._bundle(username, ctx, self._chosen(payload)), indent=1).encode()).decode()
+        name = f"""{self.name}-{Path(username).name}-{datetime.utcnow().strftime("%Y%m%d-%H%M")}.json"""
+        return imr.oob(f"""<a class="ui-btn" href="data:application/json;base64,{data}" download="{name}">Download {name}</a>""", f"{self.name}-bundle-link")
+
+    async def _im_import(self, request, payload, imr):
+        username, ctx = request.state.user.username, json.loads(payload.get("ctx") or "{}")
+        b = json.loads(payload.get("bundle") or "{}")
+        if b.get("kind") != f"portal-bundle:{self.name}": return imr.oob('<span class="err-box">Not imported - pick a bundle file exported from this module.</span>', f"{self.name}-bundle-status")
+        parts = [p for p in self._chosen(payload) if p in b.get("parts", {})]
+        backup = self.backup_dir / Path(username).name / f"""{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}.json"""
+        backup.parent.mkdir(parents=True, exist_ok=True); write_json_atomic(backup, self._bundle(username, ctx, parts), indent=1)
+        notes = [self.parts[p][2](username, ctx, b["parts"][p], payload.get("mode") == "replace") for p in parts]
+        if self.on_import: await self.on_import(request, ctx, imr)
+        return imr.oob(f"""<span class="status-label">&#x2713; Imported {html.escape("; ".join(notes) or "nothing (the bundle has none of the chosen parts)")} - backup: {backup.name}</span>""", f"{self.name}-bundle-status")    
+    
+# --- Atomic JSON Writes ---
+
+def write_json_atomic(path, data, indent=2):
+    """Writes JSON to a sibling .tmp file, flushes it to disk, then renames it over the target. A crash or power loss mid-write leaves the previous file whole instead of a truncated one; the rename is atomic within one filesystem."""
+    p = Path(path); tmp = p.with_name(f"{p.name}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f, indent=indent); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, p)
+    
+# --- File Manager ---
+# General-purpose, root-isolated file I/O. Optional IM/TM injection wires standard open/save intents for any module that wants file-backed tabs without reimplementing this.
+
+class FileManager:
+    def __init__(self, root_dir: str | Path, IM = None, TM = None, on_change = None):
+        self.root = Path(root_dir).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.IM = IM
+        self.TM = TM
+        self.on_change = on_change or self._default_notify_server # Allow passing custom callback, otherwise default to file_server memory push
+        if self.IM and self.TM:
+            p = self.TM.intent_prefix
+            self.IM.scripts[f"{p}_open_file"] = [self._intent_open_file]
+            self.IM.scripts[f"{p}_save_file"] = [self._intent_save_file]
+
+    def _default_notify_server(self, target: str | list[str], event_type: str = "modified"):
+        """Pushes direct updates to the File Server registry, bypassing watchdog lag."""
+        targets = [target] if isinstance(target, str) else target
+        abs_paths = [self.resolve(t).as_posix() for t in targets]
+        notify_manual_mutation(abs_paths, event_type)
+
+    def _trigger_change(self, target: str | list[str] = "", event_type: str = "modified"):
+        if not self.on_change: return
+        if asyncio.iscoroutinefunction(self.on_change):
+            try:
+                coro = self.on_change(target, event_type)
+            except TypeError:
+                coro = self.on_change(target)
+            try:
+                asyncio.get_running_loop().create_task(coro)
+            except RuntimeError:
+                asyncio.run(coro)
+        else:
+            try:
+                self.on_change(target, event_type)
+            except TypeError:
+                self.on_change(target)
+
+    def resolve(self, rel_path: str) -> Path:
+        if rel_path in (None, "", "."): return self.root
+        p = (self.root / rel_path).resolve()
+        try: p.relative_to(self.root)
+        except ValueError: raise HTTPException(status_code=400, detail="Path outside allowed root")
+        return p
+
+    def read(self, rel_path: str) -> str:
+        path = self.resolve(rel_path)
+        if not path.is_file(): raise HTTPException(status_code=404, detail="File not found")
+        return path.read_text(encoding="utf-8")
+
+    def write(self, rel_path: str, content: str) -> bool:
+        path = self.resolve(rel_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        self._trigger_change(rel_path, "modified")
+        return True
+
+    def write_bytes(self, rel_path: str, content: bytes) -> bool:
+        path = self.resolve(rel_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        self._trigger_change(rel_path, "modified")
+        return True
+
+    def append(self, rel_path: str, content: str) -> bool:
+        path = self.resolve(rel_path)
+        if not path.exists(): return self.write(rel_path, content)
+        with path.open("a", encoding="utf-8") as f: f.write(content)
+        self._trigger_change(rel_path, "modified")
+        return True
+
+    def delete(self, rel_path: str) -> bool:
+        path = self.resolve(rel_path)
+        if not path.exists(): return False
+        shutil.rmtree(path) if path.is_dir() else path.unlink()
+        self._trigger_change(rel_path, "deleted")
+        return True
+
+    def rename(self, rel_path: str, new_name: str) -> str:
+        path = self.resolve(rel_path)
+        if not path.exists(): raise HTTPException(status_code=404, detail="File not found")
+        new_path = path.parent / Path(new_name).name
+        if new_path.exists() and new_path != path: raise HTTPException(status_code=409, detail=f"{new_path.name} already exists here")   # a rename never replaces another file
+        path.rename(new_path)
+        new_rel = str(new_path.relative_to(self.root)).replace("\\", "/")
+        self._trigger_change(rel_path, "deleted")
+        self._trigger_change(new_rel, "created")
+        return new_rel
+
+    def move(self, rel_path: str, dest_dir_rel: str) -> str:
+        path, dest_dir = self.resolve(rel_path), self.resolve(dest_dir_rel)
+        if not path.exists(): raise HTTPException(status_code=404, detail="File not found")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / path.name
+        if dest_path.exists() and dest_path != path: raise HTTPException(status_code=409, detail=f"{path.name} already exists in {dest_dir_rel or 'the root'}")   # a move never replaces another file
+        shutil.move(str(path), str(dest_path))
+        new_rel = str(dest_path.relative_to(self.root)).replace("\\", "/")
+        self._trigger_change(rel_path, "deleted")
+        self._trigger_change(new_rel, "created")
+        return new_rel
+
+    def copy(self, rel_path: str, dest_rel_path: str) -> str:
+        path, dest_path = self.resolve(rel_path), self.resolve(dest_rel_path)
+        if not path.exists(): raise HTTPException(status_code=404, detail="File not found")
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(path, dest_path, dirs_exist_ok=True) if path.is_dir() else shutil.copy2(path, dest_path)
+        new_rel = str(dest_path.relative_to(self.root)).replace("\\", "/")
+        self._trigger_change(new_rel, "created")
+        return new_rel
+
+    def batch_rename(self, rels: list, prefix: str, start: int = 1, pad: int = 3) -> list:
+        """Renames a flat list of files to {prefix}{index:0{pad}d}{ext}, sequentially, in their existing folders. Returns the new relative paths in order; entries that don't exist or whose target name already exists are skipped silently."""
+        out = []
+        for i, rel in enumerate(rels):
+            src = self.resolve(rel)
+            if not src.exists() or src.is_dir(): continue
+            dest = src.parent / f"{prefix}{start+i:0{pad}d}{src.suffix}"
+            if dest.exists(): continue
+            src.rename(dest)
+            out.append(str(dest.relative_to(self.root)).replace("\\","/"))
+        if out: self._trigger_change(rels + out, "modified")
+        return out
+
+    def batch_delete(self, rels: list) -> int: return sum(1 for rel in rels if self.delete(rel)) #Deletes a flat list of files/folders. Returns count actually removed.
+
+    def free_name(self, rel_path: str) -> str:
+        """rel_path, or the first "name-2.ext", "name-3.ext"... that does not exist yet - for copies that must not replace a file already there."""
+        p, n = Path(rel_path), 2
+        while self.resolve(str(p)).exists(): p, n = Path(rel_path).with_name(f"{Path(rel_path).stem}-{n}{Path(rel_path).suffix}"), n + 1
+        return str(p).replace("\\", "/")
+
+    def batch_move(self, rels: list, dest_dir_rel: str) -> list:
+        """Moves a flat list of files/folders into dest_dir_rel. Returns the new relative paths."""
+        out = [self.move(rel, dest_dir_rel) for rel in rels if self.resolve(rel).exists()]
+        if out: self._trigger_change(rels + out, "modified")
+        return out
+
+    def folder_picker_html(self, selected: str = "", filter_fn = None, wire_to_input_id: str = "") -> str:
+        """Collapsible folder tree for 'pick a destination' UIs. wire_to_input_id, if given, makes every radio option also copy its value into that text input's value on click
+        - the tree becomes a browsing aid for a plain text field rather than a separate, divergent picker.
+        Same widget everywhere: type the path directly, or click to browse and fill it in, never two different pickers for the same job."""
+        onclick_extra = f" this.closest('.folder-picker-root').querySelector('#{wire_to_input_id}').value=this.value;" if wire_to_input_id else ""
+        def _walk(rel="", depth=0):
+            out = ""
+            for child_rel, d, _ in UI.list_children(self.resolve(rel), self.root, filter_fn, dirs_only=True):
+                children_html = _walk(child_rel, depth + 1)
+                is_ancestor = selected == child_rel or selected.startswith(child_rel + "/")
+                radio = f"""<input type="radio" name="parent" value="{child_rel}" {"checked" if child_rel == selected else ""} onclick="event.stopPropagation();{onclick_extra}">"""
+                if children_html: out += f"""<details {"open" if is_ancestor else ""} style="margin:0;"><summary style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9 + 0.3}rem;font-size:.78rem;cursor:pointer;list-style:none;"><span class="fp-mark"></span>{radio} &#x1F4C1; {UI.escape(d.name)}</summary>{children_html}</details>"""
+                else: out += f"""<label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;padding-left:{depth*0.9 + 0.3}rem;font-size:.78rem;cursor:pointer;"><span class="fp-mark"></span>{radio} &#x1F4C1; {UI.escape(d.name)}</label>"""
+            return out
+        return f"""<div class="folder-picker-root" style="max-height:14rem;overflow-y:auto;border:var(--border-thick) solid var(--border);border-radius:var(--radius);padding:.3rem"><label style="display:flex;align-items:center;gap:.3rem;padding:.15rem .3rem;font-size:.8rem;cursor:pointer;"><input type="radio" name="parent" value="" {"checked" if not selected else ""} onclick="event.stopPropagation();{onclick_extra}"> &#x1F4C1; (root)</label><div style="padding-left:.9rem">{_walk()}</div></div>"""
+
+    async def save_uploads(self, parent_rel: str, files: list, rel_paths: list[str] = None, on_complete=None) -> list[str]:
+        """Writes a batch of UploadFile objects under parent_rel, sanitizing every path segment..."""
+        saved = []
+        for i, f in enumerate(files):
+            if not getattr(f, "filename", ""): continue
+            raw_rel = rel_paths[i] if rel_paths and i < len(rel_paths) else f.filename
+            rel = self.safe_rel(raw_rel)
+            dest = self.resolve(parent_rel) / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with dest.open("wb") as out:
+                while chunk := await f.read(65536): out.write(chunk)
+            saved.append(str(Path(parent_rel) / rel).replace("\\", "/") if parent_rel else rel)
+        if on_complete and saved: await on_complete(saved) if asyncio.iscoroutinefunction(on_complete) else on_complete(saved)
+        if saved: self._trigger_change(saved, "created")
+        return saved
+
+    def new_item_modal_html(self, modal_id: str, create_url: str = "", parent: str = "", target_id: str = "body", swap: str = "none", filter_fn=None, intent_type: str = "", branch: str = "", lvl: int = 1) -> str: return new_item_modal_html(modal_id, create_url, self.folder_picker_html(parent, filter_fn), target_id, swap, intent_type=intent_type, branch=branch, lvl=lvl)
+    def move_modal_html(self, modal_id: str, move_url: str, item_path: str, target_id: str = "body", swap: str = "none", filter_fn=None) -> str: return move_modal_html(modal_id, move_url, self.folder_picker_html(filter_fn=filter_fn), item_path, target_id, swap)
+
+    async def _intent_open_file(self, request, payload: dict, imr):
+        rel_path = payload.get("path")
+        if not rel_path: return imr
+        try: content, filename = self.read(rel_path), Path(rel_path).name
+        except HTTPException: return imr
+        tab_id = f"doc-{uuid.uuid5(uuid.NAMESPACE_URL, rel_path).hex[:8]}"
+        return await self.TM._open(request, {"id": tab_id, "label": filename, "icon": "&#x1F4C4;", "path": rel_path, "dirty": False}, imr)
+
+    async def _intent_save_file(self, request, payload: dict, imr):
+        rel_path, content = payload.get("path"), payload.get("content", "")
+        if not rel_path: return imr
+        self.write(rel_path, content)
+        state = await self.TM._load(request)
+        tab_id = payload.get("id")
+        if tab_id and tab_id in state.get("tabs", {}):
+            state["tabs"][tab_id]["dirty"] = False
+            await self.TM._save(request, state)
+            imr.oob('<span class="saved-indicator" style="color:var(--accent);font-size:.8rem">Saved</span>', f"editor-autosave-{tab_id}")
+        return imr
+
+    def safe_join(self, parent_rel: str, name: str, default_ext: str = "") -> Path:
+        """Sanitized destination path for new-file/new-folder creation. Forces default_ext only if name has none."""
+        clean = sanitize_filename(name)
+        if default_ext and "." not in clean: clean = f"{clean}.{default_ext.lstrip('.')}"
+        return self.resolve(parent_rel) / clean
+
+    def safe_rel(self, rel_path: str) -> str: return "/".join([sanitize_filename(p) for p in rel_path.replace("\\","/").split("/") if p not in ("", ".", "..")]) # Sanitizes every segment of a relative path while preserving directory structure - for uploads that carry their own relative path.
+
+# --- File Browser UI Helpers ---
+# Shared modal fragments for any module backed by a FileManager + UI.tree. Pure HTML builders - callers own their own routes/access checks/intent names. target_id="body" (default) pairs with the IM-driven OOB convention used everywhere else in this codebase; pass a real div id + swap="innerHTML" for modules whose create/move routes return a plain HTML fragment instead (e.g. a tree panel).
+
+def _modal_target(target_id: str) -> str: return target_id if target_id == "body" else f"#{target_id}"
+
+def new_item_modal_html(modal_id: str, create_url: str = "", picker_html: str = "", target_id: str = "body", swap: str = "none", allow_upload: bool = True, intent_type: str = "", branch: str = "", lvl: int = 1) -> str:
+    """create_url (legacy plain-route target) and intent_type (routes through /im/in) are mutually exclusive - pass intent_type for new callers; create_url stays supported for anything not yet migrated to intents."""
+    post_target = "/im/in" if intent_type else create_url
+    hidden_intent = f'<input type="hidden" name="type" value="{intent_type}"><input type="hidden" name="branch" value="{branch}"><input type="hidden" name="lvl" value="{lvl}">' if intent_type else ""
+    upload_radios = f"""<label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem"><input type="radio" name="kind" value="upload" onchange="nimShowUpload('{modal_id}',false)"> Upload file(s)</label><label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem"><input type="radio" name="kind" value="upload_folder" onchange="nimShowUpload('{modal_id}',true)"> Upload folder</label>""" if allow_upload else ""
+    body = f"""<form id="nim-form-{modal_id}" hx-post="{post_target}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" hx-encoding="multipart/form-data" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex;flex-direction:column;gap:.6rem">
+                    {hidden_intent}
+                    <div id="nim-name-{modal_id}">
+                        <label style="font-size:.75rem;color:var(--text_muted)">Name<input type="text" name="name" class="module-select" placeholder="page.md or folder-name" style="width:100%"></label>
+                    </div>
+                    <div id="nim-upload-{modal_id}" style="display:none">
+                        <label style="font-size:.75rem;color:var(--text_muted)">Files<input type="file" id="nim-file-{modal_id}" name="upload" multiple class="module-select" style="width:100%" onchange="nimComputeRelPaths('{modal_id}')"></label>
+                        <input type="hidden" name="rel_paths" id="nim-relpaths-{modal_id}">
+                    </div>
+                    <label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem"><input type="radio" name="kind" value="file" checked onchange="nimShowUpload('{modal_id}',false,true)"> File</label>
+                    <label style="display:flex;align-items:center;gap:.4rem;font-size:.8rem"><input type="radio" name="kind" value="folder" onchange="nimShowUpload('{modal_id}',false,true)"> Folder</label>
+                    {upload_radios}
+                    <div style="font-size:.75rem;color:var(--text_muted)">Location</div>
+                    {picker_html}
+                    <button type="submit" class="ui-btn" style="margin-top:.3rem">Create</button>
+                </form>
+                <script>
+                function nimShowUpload(mid, isDir, hide) {{
+                    var u = document.getElementById('nim-upload-'+mid), n = document.getElementById('nim-name-'+mid), f = document.getElementById('nim-file-'+mid);
+                    if (hide) {{ u.style.display='none'; n.style.display='block'; return; }}
+                    u.style.display='block'; n.style.display='none';
+                    if (isDir) f.setAttribute('webkitdirectory',''); else f.removeAttribute('webkitdirectory');
+                }}
+                function nimComputeRelPaths(mid) {{
+                    var f = document.getElementById('nim-file-'+mid);
+                    document.getElementById('nim-relpaths-'+mid).value = JSON.stringify(Array.from(f.files).map(function(file){{ return file.webkitRelativePath || file.name; }}));
+                }}
+                </script>"""
+    return UI.modal(modal_id, "New File / Folder / Upload", body)
+
+def move_modal_html(modal_id: str, move_url: str, picker_html: str, item_path: str, target_id: str = "body", swap: str = "none", intent_type: str = "", branch: str = "", lvl: int = 1) -> str:
+    """Form field: path (hidden, item_path), parent (from picker_html)."""
+    post_target = "/im/in" if intent_type else move_url
+    hidden_intent = f'<input type="hidden" name="type" value="{intent_type}"><input type="hidden" name="branch" value="{branch}"><input type="hidden" name="lvl" value="{lvl}">' if intent_type else ""
+    return UI.modal(modal_id, "Move Item", f"""<form hx-post="{post_target}" hx-target="{_modal_target(target_id)}" hx-swap="{swap}" onsubmit="setTimeout(function(){{UI_closeModal('{modal_id}')}},50)" style="display:flex; flex-direction:column; gap:.4rem">
+                                                   {hidden_intent}<input type="hidden" name="path" value="{UI.escape(item_path)}">
+                                                   <div style="font-size:.7rem;color:var(--text_muted)">Move &ldquo;{UI.escape(item_path)}&rdquo; to:</div>
+                                                   {picker_html}
+                                                   <button type="submit" class="ui-btn" style="margin-top:.3rem">Move</button>
+                                               </form>""")
+
+# --- Image Tools ---
+
+THUMB_MAX_SIDE = 220
+
+def ensure_thumb_cached(fm, rel: str, max_side: int = THUMB_MAX_SIDE) -> Path | None:
+    try:
+        src = fm.resolve(rel)
+        if not src.exists(): return None
+        stat = src.stat()
+        thumbs_dir = fm.root / ".thumbs"; thumbs_dir.mkdir(exist_ok=True)
+        key = hashlib.sha1(f"{rel}|{stat.st_mtime}|{max_side}".encode()).hexdigest()[:24]
+        thumb_path = thumbs_dir / f"{key}.jpg"
+        if not thumb_path.exists():
+            img = _PILImageThumb.open(src)
+            if img.mode not in ("RGB", "L"): img = img.convert("RGB")
+            img.thumbnail((max_side, max_side))
+            img.save(thumb_path, format="JPEG", quality=78)
+        return thumb_path
+    except Exception: return None
+
+def thumb_data_uri(fm, rel: str, max_side: int = THUMB_MAX_SIDE) -> str:
+    p = ensure_thumb_cached(fm, rel, max_side)
+    return f"data:image/jpeg;base64,{base64.b64encode(p.read_bytes()).decode()}" if p else ""
+
+def _parse_targets(raw) -> list:
+    if isinstance(raw, list): return raw
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw.startswith("["):
+            try: return json.loads(raw)
+            except Exception: pass
+        return [raw] if raw else []
+    return []
+
+# --- Keyed Keyboard Dispatch ---
+# The bridge always sends the literal intent type "key" (it has no concept of per-widget names).
+# Multiple sibling widget instances at the same level would collide on that one name if each tried  to register its own IM.scripts["key"].
+# This is the "key" analog of how TabManager differentiates instances by intent_prefix - here, the DOM element carries data-im-role="<its own prefix>", and one shared dispatcher per IM instance looks that prefix up and delegates.
+# Any widget class can opt in.
+_KEY_ROLE_REGISTRY: dict = {}  # role_prefix -> async handler(request, payload, imr)
+
+def register_key_role(role_prefix: str, handler): _KEY_ROLE_REGISTRY[role_prefix] = handler
+
+async def _dispatch_key_by_role(request, payload, imr):
+    handler = _KEY_ROLE_REGISTRY.get(payload.get("element_role", ""))
+    return await handler(request, payload, imr) if handler else imr
+
+def ensure_key_dispatch(IM):
+    """Idempotent - call once per widget instance construction. Safe to call from many widgets sharing one IM."""
+    if "key" not in IM.scripts: IM.scripts["key"] = [_dispatch_key_by_role]
+
+IMAGE_GALLERY_JS = """
+function igalCheckedTargets(prefix) {
+    return Array.from(document.querySelectorAll('#igal-grid-'+prefix+' input.igal-checkbox:checked')).map(function(c){ return c.value; });
+}
+function igalMoveConfirm(prefix, dir, lvl) {
+    var picked = document.querySelector('#modal-igal-move-'+prefix+' input[name="parent"]:checked');
+    var typed = document.getElementById('igal-mv-new-'+prefix);
+    var base = picked ? picked.value : '', sub = typed ? typed.value.trim().replace(/^[/]+|[/]+$/g, '') : '';
+    var dest = sub ? (base ? base + '/' + sub : sub) : base;   /* a typed name is a new folder inside the picked one */
+    var targets = igalCheckedTargets(prefix);
+    UI_closeModal('igal-move-'+prefix);
+    if (!targets.length) return;
+    htmx.ajax('POST', '/im/in', {values: {type: prefix+'_move', branch: prefix, lvl: lvl, dir: dir, name: dest, delete_targets: JSON.stringify(targets)}, swap: 'none'});
+}
+"""
+
+class ImageGallery:
+    """
+    General-purpose folder-aware image browser + lightbox. Root-isolated via FileManager, so it's safe to point at any output directory.
+    Drop-in like PortalEditor: construct once with IM/intent_prefix, call render_shell().
+    """
+    CSS = """
+    .igal-shell{display:flex;flex-direction:column;height:100%;overflow:hidden}
+    .igal-crumbs{display:flex;gap:.3rem;align-items:center;padding:.4rem .6rem;border-bottom:var(--border-thick) solid var(--border);font-size:.7rem;flex-wrap:wrap;flex-shrink:0}
+    .igal-crumb{cursor:pointer;color:var(--text_muted)}
+    .igal-crumb:hover{color:var(--accent)}
+    .igal-grid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--igal-thumb,10rem),1fr));gap:.2rem;padcursor4rem;align-content:start}
+    .igal-folder{display:flex;flex-direction:column;align-items:center;justify-content:center;aspect-ratio:1;cursor:pointer;border:var(--border-thick) solid var(--border);border-radius:var(--radius);gap:.3rem;background:var(--glass)}
+    .igal-folder:hover{border-color:var(--accent)}
+    .igal-card {position:relative; display:flex; flex-direction:column; overflow:hidden; border-radius:var(--radius); border:var(--border-thick) solid var(--border);}
+    .igal-thumb-wrap{width:100%;aspect-ratio:1;background:var(--bg);display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:zoom-in}
+    .igal-thumb-wrap img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
+    .igal-lightbox{position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:9000;display:flex;flex-direction:column}
+    .igal-lb-top{display:flex;justify-content:space-between;align-items:center;padding:.6rem 1rem;color:#fff;font-size:.78rem;flex-shrink:0}
+    .igal-lb-body{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+    .igal-lb-body img{max-width:95vw;max-height:80vh;object-fit:contain;transition:transform .15s}
+    .igal-lb-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.1);border:none;color:#fff;font-size:1.4rem;padding:.6rem .9rem;cursor:pointer;border-radius:var(--radius)}
+    .igal-lb-nav.prev{left:1rem}.igal-lb-nav.next{right:1rem}
+    .igal-lb-bottom{display:flex;justify-content:center;gap:.5rem;padding:.6rem;flex-shrink:0}
+    .igal-checkbox {position:absolute; top:.4rem; left:.4rem; z-index:10; width:1.2rem; height:1.2rem; cursor:pointer;}
+    .igal-controls {margin-left:auto;} /* Pushes the delete button to the right side of the breadcrumbs */
+    .igal-folder-wrap { position: relative; }
+    .igal-item-btn { background: none; border: none; color: var(--text_muted); cursor: pointer; font-size: .65rem; padding: .1rem .2rem; border-radius: .2rem; line-height: 1.4; flex-shrink: 0;}
+    .igal-item-btn:hover { color: var(--accent); background: var(--accent_dim); }
+    .igal-folder-wrap .igal-item-btn { position: absolute; top: .2rem; right: .2rem; opacity: 0; transition: opacity .15s; background: var(--bg_panel);}
+    .igal-folder-wrap:hover .igal-item-btn { opacity: 1; }
+    .igal-card-footer { display: flex; align-items: center; gap: .1rem; padding: .1rem .2rem; border-top: var(--border-thick) solid var(--border);}
+    .igal-grid { grid-auto-rows: max-content; align-items: start; }
+    .igal-thumb-wrap {aspect-ratio: 1 / 1; width: 100%; }
+    .igal-thumb-wrap img { width: 100%; height: 100%; object-fit: contain;}
+    """
+
+    IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+    def __init__(self, root_dir, IM=None, intent_prefix="igal", nesting_level=1, file_manager=None, select_mode=False, on_select=None, full_url_fn=None, transfer_targets: dict = None):
+        self.fm = file_manager
+        self.IM = IM
+        self.intent_prefix = intent_prefix
+        self.nesting_level = nesting_level
+        self.select_mode = select_mode
+        self.on_select = on_select
+        self.full_url_fn = full_url_fn  # callable(rel_path)->url for the single lightbox/download image; None falls back to inline base64
+        self.transfer_targets = transfer_targets or {}
+        if self.IM:
+            p = self.intent_prefix
+            self.IM.scripts[f"{p}_browse"] = [self._im_browse]
+            self.IM.scripts[f"{p}_create_folder"] = [self._intent_create_folder]
+            self.IM.scripts[f"{p}_rename"] = [self._intent_rename]
+            register_key_role(self.intent_prefix, self._im_key)
+            register_key_role(f"{self.intent_prefix}_lb", self._im_lb_key)
+            ensure_key_dispatch(self.IM)
+            if self.select_mode and self.on_select:
+                self.IM.scripts[f"{p}_pick"] = [self.on_select]
+            else:
+                self.IM.scripts[f"{p}_lightbox"] = [self._im_lightbox]
+                self.IM.scripts[f"{p}_move"] = [self._intent_move]
+                self.IM.scripts[f"{p}_meta"] = [self._intent_meta]
+                self.IM.scripts[f"{p}_delete"] = [self._intent_delete]
+                self.IM.scripts[f"{p}_move_modal"] = [self._im_move_modal]
+                self.IM.scripts[f"{p}_key"] = [self._im_key]
+            if self.transfer_targets and not self.select_mode: self.IM.scripts[f"{p}_transfer"] = [self._intent_transfer]
+            if not self.select_mode: self.IM.scripts[f"{p}_lb_action"] = [self._im_lb_action]
+
+    def _data_uri(self, rel: str) -> str:
+        """Reads directly off disk via the FileManager already scoped to this gallery's root -- no route, no URL, no separate request. This is a local file the process already has a handle-worthy path to."""
+        try:
+            path = self.fm.resolve(rel)
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
+        except Exception:
+            return ""
+
+    def _entries(self, rel_dir: str, limit: int = None):
+        root = self.fm.resolve(rel_dir)
+        dirs, files = [], []
+        for child_rel, path, is_dir in UI.list_children(root, root):
+            full_rel = f"{rel_dir}/{child_rel}".strip("/") if rel_dir else child_rel
+            if is_dir: dirs.append((full_rel, path.name))
+            elif path.suffix.lower() in self.IMG_EXTS: files.append((full_rel, path.name, path.stat().st_mtime))
+        files.sort(key=lambda x: x[2], reverse=True)
+        total = len(files)
+        return dirs, (files[:limit] if limit else files), total
+
+    def render_shell(self, rel_dir: str = "", include_css: bool = True, limit: int = 60) -> str:
+        style_tag = f"<style>{self.CSS}</style>" if include_css else ""
+        p = self.intent_prefix
+        return f"""{style_tag}
+                   <div class="igal-shell" id="igal-shell-{p}">
+                       {self._crumbs_html(rel_dir)}
+                       <div class="igal-grid" id="igal-grid-{p}" tabindex="0" data-im-role="{p}" data-im-scope="{_safe(rel_dir)}" data-im-keys="Delete Backspace" data-im-read="input.igal-checkbox:checked">{self.grid_html(rel_dir, limit)}</div>
+                       <div id="igal-lightbox-slot-{p}"></div>
+                   </div>"""
+
+    def lightbox_html(self, rel_dir: str, index: int) -> str:
+        _, files, _ = self._entries(rel_dir)
+        if not files: return ""
+        index = max(0, min(index, len(files) - 1))
+        full_rel, name, _ = files[index]
+        p = self.intent_prefix
+        def _nav_vals(i): return json.dumps({"type": f"{p}_lightbox", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "index": i})
+        prev_btn = f"""<button class="igal-lb-nav prev" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index-1)%len(files))}'>&#x2039;</button>""" if len(files) > 1 else ""
+        next_btn = f"""<button class="igal-lb-nav next" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_nav_vals((index+1)%len(files))}'>&#x203A;</button>""" if len(files) > 1 else ""
+        img_src = self.full_url_fn(full_rel) if self.full_url_fn else self._data_uri(full_rel)
+        def _act(key): return json.dumps({"type": f"{p}_lb_action", "branch": p, "lvl": self.nesting_level, "key": key, "element_scope": f"{rel_dir}|{index}"})
+        copy_btns = "".join(f"""<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_transfer", "branch": p, "lvl": self.nesting_level, "path": full_rel, "dest": k})}' title="Copy this image to {UI.escape(k)} (a free name is used if one is taken)">&#x2934; {UI.escape(k)}</button>""" for k in self.transfer_targets)
+        delete_btn = f"""<button class="cm-qbtn" style="color:#ff4444" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_act("Delete")}' title="Delete this image and show the next (the Delete key does the same)">&#x1F5D1; Delete</button>"""
+        return f"""<div class="igal-lightbox" tabindex="-1" data-im-role="{p}_lb" data-im-keys="ArrowLeft ArrowRight Delete Backspace Escape" data-im-scope="{_safe(rel_dir)}|{index}" onclick="if(event.target===this) this.innerHTML=''">
+                       <div class="igal-lb-top"><span>{UI.escape(name)} &middot; {index+1}/{len(files)}</span><span style="cursor:pointer" onclick="document.getElementById('igal-lightbox-slot-{p}').innerHTML=''">&#x2715;</span></div>
+                       <div class="igal-lb-body">{prev_btn}<img id="igal-lb-img-{p}" src="{img_src}" onwheel="event.preventDefault(); var s=(this.dataset.z||1)*1+(event.deltaY<0?.15:-.15); s=Math.max(1,Math.min(s,4)); this.dataset.z=s; this.style.transform='scale('+s+')'">{next_btn}</div>
+                       <div class="igal-lb-bottom"><button class="cm-qbtn" onclick="document.getElementById('igal-lb-img-{p}').dataset.z=1;document.getElementById('igal-lb-img-{p}').style.transform='scale(1)'">Reset zoom</button>{copy_btns}{delete_btn}<span id="igal-lb-msg-{p}" style="color:#fff;font-size:.7rem"></span></div>
+                   </div>"""
+
+    async def _im_lightbox(self, request, payload, imr):
+        rel_dir, index = payload.get("dir", ""), int(payload.get("index", 0))
+        imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}">{self.lightbox_html(rel_dir, index)}<script>var el=document.querySelector("[data-im-role={self.intent_prefix}_lb]");if(el)el.focus();</script></div>')
+        return imr
+
+    async def _im_browse(self, request, payload, imr):
+        rel_dir = payload.get("dir", "")
+        limit = int(payload.get("limit", 60))
+        imr.oob(self._crumbs_html(rel_dir), f"igal-crumbs-{self.intent_prefix}", swap="outerHTML")
+        imr.oob(self.grid_html(rel_dir, limit), f"igal-grid-{self.intent_prefix}")
+        return imr
+
+    def grid_html(self, rel_dir: str, limit: int = 60) -> str:
+        dirs, files, total = self._entries(rel_dir, limit)
+        p = self.intent_prefix
+        cells = ""
+        for full_rel, name in dirs:
+            browse_vals = json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": full_rel})
+            rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
+            cells += f"""<div class="igal-folder-wrap"><div class="igal-folder" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{browse_vals}'><span style="font-size:1.8rem">&#x1F4C1;</span><span style="font-size:.7rem;text-align:center;padding:0 .3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90%">{_safe(name)}</span></div><button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename folder to:" title="Rename folder">&#x270E;</button></div>"""
+        for i, (full_rel, name, _mtime) in enumerate(files):
+            thumb_url = thumb_data_uri(self.fm, full_rel)
+            if self.select_mode:
+                pick_vals = json.dumps({"type": f"{p}_pick", "branch": p, "lvl": self.nesting_level, "path": full_rel})
+                cells += f"""<div class="igal-card"><div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{pick_vals}'><img src="{thumb_url}" loading="lazy" alt="{_safe(name)}"></div><div class="igal-card-footer"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span></div></div>"""
+                continue
+            lb_vals = json.dumps({"type": f"{p}_lightbox", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "index": i})
+            meta_vals = json.dumps({"type": f"{p}_meta", "branch": p, "lvl": self.nesting_level, "path": full_rel})
+            rename_vals = json.dumps({"type": f"{p}_rename", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "path": full_rel})
+            dl_href = self.full_url_fn(full_rel) if self.full_url_fn else self._data_uri(full_rel)
+            cells += f"""<div class="igal-card">
+                             <input type="checkbox" class="igal-checkbox" name="delete_targets" value="{_safe(full_rel)}">
+                             <div class="igal-thumb-wrap" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{lb_vals}'><img src="{thumb_url}" loading="lazy" alt="{_safe(name)}"></div>
+                             <div class="igal-card-footer">
+                                 <span title="{_safe(name)}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.6rem;color:var(--text_muted)">{_safe(name)}</span>
+                                 <a class="igal-item-btn" href="{dl_href}" download="{_safe(name)}" title="Download">&#x2B07;</a>
+                                 <button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{meta_vals}' title="Info">&#x2139;</button>
+                                 <button class="igal-item-btn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{rename_vals}' hx-prompt="Rename to:" title="Rename">&#x270E;</button>
+                             </div>
+                         </div>"""
+        if total > limit:
+            more_vals = json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": rel_dir, "limit": limit + 60})
+            cells += f"""<div style="grid-column:1/-1;text-align:center;padding:.8rem"><button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{more_vals}'>Load more ({total-limit} remaining)</button></div>"""
+        if not cells: cells = """<div style="grid-column:1/-1;color:var(--text_muted);padding:1rem;font-size:.7rem">Empty folder.</div>"""
+        return cells
+
+    async def _intent_create_folder(self, request, payload, imr):
+        rel_dir = payload.get("dir", "")
+        name = (payload.get("name") or "").strip()
+        if not name: return imr
+        try:
+            dest = self.fm.safe_join(rel_dir, name)
+            dest.mkdir(parents=True, exist_ok=True)
+            self.fm._trigger_change(str(dest.relative_to(self.fm.root)).replace("\\", "/"), "created")
+        except Exception as e:
+            imr.oob(f'<span style="color:#ff5f5f;font-size:.7rem">&#x26A0; {_safe(str(e)[:60])}</span>', "igal-action-msg")
+            return imr
+        return await self._im_browse(request, {"dir": rel_dir}, imr)
+
+    async def _intent_rename(self, request, payload, imr):
+        rel_path = payload.get("path", "")
+        new_name = (payload.get("name") or "").strip()
+        rel_dir = payload.get("dir", "")
+        if not rel_path or not new_name: return imr
+        ext = Path(rel_path).suffix
+        if not self.fm.resolve(rel_path).is_dir() and Path(new_name).suffix.lower() != ext.lower(): new_name += ext   # the gallery never changes a file's type: "cat" and "cat v1.2" both keep .png
+        try:
+            self.fm.rename(rel_path, new_name)
+        except Exception as e:
+            imr.oob(f'<span style="color:#ff5f5f;font-size:.7rem">&#x26A0; {_safe(str(e)[:60])}</span>', "igal-action-msg")
+            return imr
+        return await self._im_browse(request, {"dir": rel_dir}, imr)
+
+    async def _intent_meta(self, request, payload, imr):
+        rel = payload.get("path", "")
+        if not rel: return imr
+        try:
+            path = self.fm.resolve(rel)
+            img = _PILImageThumb.open(path)
+            stat = path.stat()
+            w, h = img.size
+            info = img.info or {}
+            rows = "".join( f'<div style="font-size:.7rem;padding:.1rem 0;border-bottom:var(--border-thick) solid var(--border)"><span style="color:var(--text_muted)">{_safe(str(k))}:</span> {_safe(str(v))}</div>' for k, v in info.items())
+            html = (f"""<div class="glass igal-meta-card">
+                            <div style="font-size:.8rem; font-weight:600 ;margin-bottom:.3rem">{_safe(path.name)}</div>
+                            <div style="font-size:.8rem; color:var(--text_muted); margin-bottom:.4rem">{w}×{h} · {stat.st_size//1024} KB · {img.mode}</div>
+                            {rows or "<div style=font-size:.8rem;color:var(--text_muted)>No embedded metadata.</div>"}
+                            <button class="cm-qbtn" style="margin-top:.4rem" onclick="document.getElementById('igal-lightbox-slot-{self.intent_prefix}').innerHTML=''">&#x2715; Close</button>
+                        </div>""")
+            imr.oob(html, f"igal-lightbox-slot-{self.intent_prefix}")
+        except Exception as e:
+            imr.oob(f'<div class="glass" style="padding:.5rem;font-size:.7rem;color:#ff5f5f">{_safe(str(e)[:80])}</div>', f"igal-lightbox-slot-{self.intent_prefix}")
+        return imr
+
+    async def _intent_transfer(self, request, payload, imr):
+        """Copies one image (path) or the checked ones (delete_targets) into a transfer target's root; a name already taken there gets -2, -3... (nothing is replaced)."""
+        dest_key = payload.get("dest", "")
+        dest_root, rels = self.transfer_targets.get(dest_key), [payload["path"]] if payload.get("path") else _parse_targets(payload.get("delete_targets", []))
+        if not dest_root or not rels: return imr.oob('<span style="color:#ffaa44;font-size:.7rem">Select items first</span>', "igal-action-msg")
+        dest, done = FileManager(Path(dest_root)), []
+        for rel in rels:
+            name = dest.free_name(Path(rel).name)
+            dest.write_bytes(name, self.fm.resolve(rel).read_bytes())
+            done.append(name)
+        msg = f"""<span style="color:var(--accent);font-size:.7rem">&#x2713; Copied {len(done)} to {_safe(dest_key)}{": " + _safe(done[0]) if len(done) == 1 else ""}</span>"""
+        imr.oob(msg, f"igal-lb-msg-{self.intent_prefix}")
+        return imr.oob(msg, "igal-action-msg")
+
+    def _crumbs_html(self, rel_dir: str) -> str:
+        parts = [p for p in rel_dir.split("/") if p]
+        p = self.intent_prefix
+        crumbs = [f"""<span class="igal-crumb" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": ""})}'>&#x1F3E0; root</span>"""]
+        acc = ""
+        for part in parts:
+            acc = f"{acc}/{part}".strip("/")
+            crumbs.append(f"""<span style="opacity:.4">/</span><span class="igal-crumb" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_browse", "branch": p, "lvl": self.nesting_level, "dir": acc})}'>{_safe(part)}</span>""")
+        copy_sel = f"""<select class="module-select" style="width:auto;margin:0;font-size:.7rem" title="Copy the checked images to..." onchange="if(this.value){{htmx.ajax('POST','/im/in',{{values:{{type:'{p}_transfer', branch:'{p}', lvl:{self.nesting_level}, dest:this.value, delete_targets: JSON.stringify(igalCheckedTargets('{p}'))}}, swap:'none'}}); this.value='';}}"><option value="">Copy checked to...</option>{"".join(f'<option value="{_safe(k)}">{_safe(k)}</option>' for k in self.transfer_targets)}</select>""" if self.transfer_targets and not self.select_mode else ""
+        controls = f"""<div class="igal-controls">{copy_sel}
+                           <button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{json.dumps({"type": f"{p}_create_folder", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-prompt="New folder name:" title="New folder">&#x1F4C1;+</button>
+                           <button class="cm-qbtn" onclick="htmx.ajax('POST','/im/in',{{values:{{type:'{p}_move_modal', branch:'{p}', lvl:{self.nesting_level}, dir:'{rel_dir}', delete_targets: JSON.stringify(igalCheckedTargets('{p}'))}}, swap:'none'}})" title="Move selected">&#x21C6;</button>
+                           <button class="cm-qbtn" style="color:#ff4444" hx-post="/im/in" hx-target="body" hx-swap="none" hx-include="#igal-grid-{p}" hx-vals='{json.dumps({"type": f"{p}_delete", "branch": p, "lvl": self.nesting_level, "dir": rel_dir})}' hx-confirm="Delete selected items?" title="Delete selected">&#x1F5D1;</button>
+                       </div>"""
+        return f"""<div class="igal-crumbs" id="igal-crumbs-{p}">{"".join(crumbs)}<span id="igal-action-msg" style="font-size:.7rem;margin-left:.4rem"></span>{controls}</div>"""
+
+    def _move_modal_html(self, rel_dir: str, count: int) -> str:
+        p = self.intent_prefix
+        body = f"""<div style="font-size:.75rem;color:var(--text_muted);margin-bottom:.5rem">Move {count} item(s) to:</div>
+                   {self.fm.folder_picker_html()}
+                   <input type="text" id="igal-mv-new-{p}" placeholder="new folder inside the picked one (optional)" class="module-select" style="width:100%;font-size:.75rem;margin-top:.4rem">
+                   <button type="button" class="ui-btn" style="width:100%;margin-top:.6rem" onclick="igalMoveConfirm('{p}','{_safe(rel_dir)}',{self.nesting_level})">Move</button>"""
+        return UI.modal(f"igal-move-{p}", "Move Items", body)
+
+    async def _im_move_modal(self, request, payload, imr):
+        rel_dir = payload.get("dir", "")
+        targets = _parse_targets(payload.get("delete_targets", []))
+        if not targets:
+            imr.oob('<span style="color:#ffaa44;font-size:.7rem">Select items first</span>', "igal-action-msg")
+            return imr
+        imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}">{self._move_modal_html(rel_dir, len(targets))}</div>')
+        return imr
+
+    async def _intent_move(self, request, payload, imr):
+        """Moves the checked items into the picked folder (or a new folder created inside it). Items whose name is taken there stay where they are and are listed."""
+        targets = _parse_targets(payload.get("delete_targets", []))
+        dest, rel_dir, kept = (payload.get("name") or "").strip().strip("/"), payload.get("dir", ""), []
+        for rel in targets:
+            try: self.fm.move(rel, dest)
+            except HTTPException as e: kept.append(str(e.detail))
+        await self._im_browse(request, {"dir": rel_dir}, imr)
+        return imr.oob(f"""<span style="color:#ffaa44;font-size:.7rem">Not moved: {_safe("; ".join(kept))}</span>""", "igal-action-msg") if kept else imr
+
+    async def _intent_delete(self, request, payload, imr):
+        targets = payload.get("delete_targets", [])
+        if isinstance(targets, str): targets = [targets]
+        rel_dir = payload.get("dir", "")
+        if targets: self.fm.batch_delete(targets)
+        return await self._im_browse(request, payload, imr)
+
+    # IS THIS USED????
+    async def _im_key(self, request, payload, imr):
+        key = payload.get("key", "")
+        rel_dir = payload.get("element_scope", "")
+        if key in ("Delete", "Backspace"):
+            targets = _parse_targets(payload.get("selected", []))
+            if not targets: return imr
+            self.fm.batch_delete(targets)
+            return await self._im_browse(request, {"dir": rel_dir}, imr)
+        return imr
+
+    async def _im_lb_action(self, request, payload, imr): return await self._im_lb_key(request, payload, imr)   # lightbox buttons (phone: no keyboard) send the same keys
+
+    async def _im_lb_key(self, request, payload, imr):
+        key = payload.get("key", "")
+        scope = payload.get("element_scope", "")
+        rel_dir, _, idx = scope.rpartition("|")
+        index = int(idx or 0)
+        if key == "Escape": return imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}"></div>')
+        _, files, _ = self._entries(rel_dir)
+        if not files: return imr
+        if key in ("Delete", "Backspace"):
+            full_rel, _, _ = files[index]
+            self.fm.delete(full_rel)
+            imr.oob(self.grid_html(rel_dir), f"igal-grid-{self.intent_prefix}")
+            _, files, _ = self._entries(rel_dir)
+            if not files: return imr.raw(f'<div hx-swap-oob="innerHTML:#igal-lightbox-slot-{self.intent_prefix}"></div>')
+            return await self._im_lightbox(request, {"dir": rel_dir, "index": min(index, len(files)-1)}, imr)
+        new_index = (index - 1) % len(files) if key == "ArrowLeft" else (index + 1) % len(files) if key == "ArrowRight" else index
+        return await self._im_lightbox(request, {"dir": rel_dir, "index": new_index}, imr)
+
+def _safe(s: str) -> str: return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+class ShadowStore:
+    """
+    Reversible-write layer over a FileManager. Every AI-produced write - text or binary - stages here first; nothing reaches the real file tree without accept() (or auto_accept, an explicit per-store opt-in, never a default).
+    This is the "stakes" boundary: the person who owns the data's value stays in the loop for every change, proportional to nothing - it's the same gate whether the change is trivial or precious, because the AI cannot know which is which.
+    Binary entries skip diffing (nothing meaningful to diff) but go through the identical stage/accept/reject/rollback lifecycle as text.
+    """
+    def __init__(self, fm, store_dir, auto_accept: bool = False, **kwargs):
+        self.fm = fm
+        self.dir = Path(store_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.auto_accept = auto_accept
+
+    def _key(self, rel_path): return hashlib.sha1(rel_path.encode()).hexdigest()[:20]
+    def _sp(self, rel_path): return self.dir / f"{self._key(rel_path)}.json"
+    def _bp(self, rel_path): return self.dir / f"{self._key(rel_path)}.bin"
+
+    _PREV_KEEP = 30   # earlier pending versions kept per file, so one run's versions can be taken back (undo_tag)
+
+    def stage(self, rel_path: str, new_content: str, author: str = "ai", tag: str = "") -> dict:
+        """Stages a text change. Restaging a pending change by the same author keeps the earlier version in "prev" (newest last) with its tag - tag names who staged a version (an agent run), so undo_tag can take one run's versions back."""
+        try: base = self.fm.read(rel_path)
+        except Exception: base = ""
+        old = self.get(rel_path)
+        prev = (old.get("prev", []) + [{k: old.get(k) for k in ("proposed", "tag", "staged")}])[-self._PREV_KEEP:] if old and old.get("status") == "pending" and old.get("kind") == "text" and old.get("author") == author else []
+        entry = {"path": rel_path, "kind": "text", "base": base, "proposed": new_content, "author": author, "status": "pending", "staged": time.time(), **({"tag": tag} if tag else {}), **({"prev": prev} if prev else {})}
+        self._sp(rel_path).write_text(json.dumps(entry, indent=2))
+        if self.auto_accept: self.accept(rel_path); entry["status"] = "accepted"
+        return entry
+
+    def stage_binary(self, rel_path: str, data: bytes, author: str = "ai") -> dict:
+        entry = {"path": rel_path, "kind": "binary", "author": author, "status": "pending", "staged": time.time(), "size": len(data)}
+        self._bp(rel_path).write_bytes(data)
+        self._sp(rel_path).write_text(json.dumps(entry, indent=2))
+        if self.auto_accept: self.accept(rel_path); entry["status"] = "accepted"
+        return entry
+
+    def pending(self) -> list:
+        out = []
+        for f in self.dir.glob("*.json"):
+            try:
+                e = json.loads(f.read_text())
+                if e.get("status") == "pending": out.append(e)
+            except Exception: continue
+        return sorted(out, key=lambda e: e.get("staged", 0), reverse=True)
+
+    def get(self, rel_path: str): p = self._sp(rel_path); return json.loads(p.read_text()) if p.exists() else None
+
+    def diff(self, rel_path: str) -> str:
+        e = self.get(rel_path)
+        if not e or e.get("kind") == "binary": return ""
+        try: current = self.fm.read(rel_path)
+        except Exception: current = ""
+        return "\n".join(difflib.unified_diff(current.splitlines(), e["proposed"].splitlines(), fromfile=f"current/{rel_path}", tofile=f"proposed/{rel_path}", lineterm=""))
+
+    def _backup(self, rel_path: str, read_bytes: bool):
+        try:
+            p = self.fm.resolve(rel_path)
+            if not p.exists(): return
+            backup_dir = self.dir / "_history" / self._key(rel_path)
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            (backup_dir / f"{ts}{p.suffix}").write_bytes(p.read_bytes()) if read_bytes else (backup_dir / f"{ts}.txt").write_text(p.read_text())
+        except Exception: pass
+
+    def _crlf(self, rel_path: str) -> bool: p = self.fm.resolve(rel_path); return p.is_file() and b"\r\n" in p.read_bytes()[:65536]
+    def _apply_text(self, entry: dict):
+        self._backup(entry["path"], read_bytes=False)
+        self.fm.write(entry["path"], entry["proposed"].replace("\r\n", "\n").replace("\n", "\r\n") if self._crlf(entry["path"]) else entry["proposed"])   # proposals are built from FileManager.read (newlines as \n); a file with Windows line endings keeps them
+
+    def _apply_binary(self, rel_path: str):
+        self._backup(rel_path, read_bytes=True)
+        self.fm.write_bytes(rel_path, self._bp(rel_path).read_bytes())
+
+    def stale(self, rel_path: str) -> bool:
+        """The file changed since the change was proposed (someone edited it, or another proposal was accepted): accepting would overwrite that newer work with a version built on the old one."""
+        e = self.get(rel_path)
+        if not e or e.get("kind") == "binary" or "base" not in e: return False
+        try: current = self.fm.read(rel_path)
+        except Exception: current = ""
+        return current.replace("\r\n", "\n") != e["base"].replace("\r\n", "\n")
+
+    def accept(self, rel_path: str, force: bool = False) -> bool:
+        """Applies a pending change. A stale one (stale()) is refused unless force is given - the person has seen that the file changed and accepts anyway."""
+        e = self.get(rel_path)
+        if not e or e["status"] != "pending" or (not force and self.stale(rel_path)): return False
+        self._apply_binary(rel_path) if e.get("kind") == "binary" else self._apply_text(e)
+        self._sp(rel_path).unlink(missing_ok=True)
+        self._bp(rel_path).unlink(missing_ok=True)
+        return True
+
+    def undo_tag(self, rel_path: str, tag: str) -> str:
+        """Takes back the versions tag staged on top of a pending change: the newest earlier version from another tag becomes the proposal again, or the change is rejected when tag made all of it.
+        Refused ("later") when a version from another tag is on top - that later work was built on this one. Returns "undone", "rejected", "later" or "" (nothing of tag's pending)."""
+        e = self.get(rel_path)
+        if not e or e.get("status") != "pending" or e.get("tag") != tag:
+            return "later" if e and e.get("status") == "pending" and any(v.get("tag") == tag for v in e.get("prev", [])) else ""
+        prev = list(e.get("prev", []))
+        while prev and prev[-1].get("tag") == tag: prev.pop()
+        if not prev: self.reject(rel_path); return "rejected"
+        top = prev.pop()
+        self._sp(rel_path).write_text(json.dumps({**e, "proposed": top["proposed"], "tag": top.get("tag", ""), "staged": top.get("staged", e["staged"]), "prev": prev}, indent=2))
+        return "undone"
+
+    def reject(self, rel_path: str) -> bool:
+        found = self._sp(rel_path).exists()
+        self._sp(rel_path).unlink(missing_ok=True)
+        self._bp(rel_path).unlink(missing_ok=True)
+        return found
+
+    def history(self, rel_path: str) -> list:
+        d = self.dir / "_history" / self._key(rel_path)
+        return sorted((f.name for f in d.glob("*")), reverse=True) if d.exists() else []
+
+    def rollback(self, rel_path: str, filename: str) -> bool:
+        f = self.dir / "_history" / self._key(rel_path) / filename
+        if not f.exists(): return False
+        if f.suffix == ".txt": self._apply_text({"path": rel_path, "proposed": f.read_text()})
+        else: self._bp(rel_path).write_bytes(f.read_bytes()); self._apply_binary(rel_path); self._bp(rel_path).unlink(missing_ok=True)
+        return True
+
+def shadow_review_html(shadow, intent_type: str, extra_vals: dict = None, list_id: str = "shadow-list") -> str:
+    """Every button POSTs /im/in with {type: intent_type, action: accept|reject|diff, path, diff_target, **extra_vals}.
+    Caller registers ONE intent handler that switches on payload['action'] - no per-action routes."""
+    pend = shadow.pending()
+    if not pend: return '<div style="color:var(--text_muted);font-size:.8rem;padding:.5rem">No pending changes.</div>'
+    rows = ""
+    for e in pend:
+        rp = e["path"]; did = f"shadow-diff-{abs(hash(rp))%99999}"
+        stale = shadow.stale(rp)
+        def _vals(action, rp=rp, did=did): return json.dumps({"type": intent_type, "action": action, "path": rp, "diff_target": did, **({"force": "1"} if stale and action == "accept" else {}), **(extra_vals or {})})
+        diff_btn = "" if e.get("kind")=="binary" else f"""<button class="cm-qbtn" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("diff")}'>Diff</button>"""
+        size_note = f'<span style="font-size:.6rem;color:var(--text_muted)">{e.get("size",0)//1024} KB</span>' if e.get("kind")=="binary" else ""
+        rows += f"""<div class="glass" style="padding:.5rem .7rem;margin-bottom:.3rem">
+            <div style="display:flex;align-items:center;gap:.4rem">
+                <span style="flex:1;font-family:var(--font-mono);font-size:.78rem">{rp}</span>
+                <span style="font-size:.65rem;color:var(--text_muted)">{e.get("author","")}</span>
+                {diff_btn}{size_note}
+                {'<span style="font-size:.65rem;color:#ffaa44" title="Accepting replaces the file as it is now with a version built on the older one - check the diff">file changed since proposed</span>' if stale else ""}
+                <button class="cm-qbtn" style="color:var(--accent)" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("accept")}'{' hx-confirm="This file changed after the change was proposed. Accepting replaces the newer file with this version. Accept anyway?"' if stale else ""}>{"Accept anyway" if stale else "Accept"}</button>
+                <button class="cm-qbtn" style="color:#ff5f5f" hx-post="/im/in" hx-target="body" hx-swap="none" hx-vals='{_vals("reject")}'>Reject</button>
+            </div>
+            <div id="{did}" style="font-size:.68rem;font-family:var(--font-mono);white-space:pre-wrap;margin-top:.3rem"></div>
+        </div>"""
+    return rows
+
+class PromptBlockLibrary:
+    """Generalized reusable text-block library ("mix and match" prompt fragments) - not tied to any one save slot.
+    Blocks are named, taggable snippets in flat JSON; any textarea-driven UI lists/inserts them via these three methods.
+    Storage is per json_path so callers pick scope (server-wide, per-user, per-project) just by choosing a different path."""
+    def __init__(self, json_path):
+        self.path = Path(json_path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def list(self, tag: str = None) -> list:
+        blocks = json.loads(self.path.read_text()) if self.path.exists() else []
+        return [b for b in blocks if not tag or tag in b.get("tags", [])]
+
+    def get(self, block_id: str): return next((b for b in self.list() if b["id"] == block_id), None)
+
+    def save(self, name: str, text: str, tags: list = None, block_id: str = None) -> dict:
+        blocks = self.list()
+        if block_id and (b := next((b for b in blocks if b["id"] == block_id), None)): b.update(name=name, text=text, tags=tags or [])
+        else:
+            block_id = block_id or f"blk_{uuid.uuid4().hex[:8]}"
+            blocks.append({"id": block_id, "name": name, "text": text, "tags": tags or []})
+        self.path.write_text(json.dumps(blocks, indent=2))
+        return self.get(block_id)
+
+    def delete(self, block_id: str): self.path.write_text(json.dumps([b for b in self.list() if b["id"] != block_id], indent=2))
+
+def prompt_block_picker_html(library: "PromptBlockLibrary", textarea_id: str, save_url: str) -> str:
+    """Dropdown + insert/save controls targeting a specific textarea by id. Insert APPENDS to the field's current value (mix-and-match composition), not replace - multiple blocks layer into one field across repeated inserts."""
+    blocks = library.list()
+    opts = "".join(f'<option value="{b["id"]}" data-text="{UI.escape(b["text"])}">{UI.escape(b["name"])}</option>' for b in blocks) or '<option value="">(no blocks saved)</option>'
+    return f"""<div class="pb-picker" data-save-url="{save_url}" style="display:flex;gap:.3rem;align-items:center;margin:.2rem 0">
+                   <select class="pb-select module-select" style="font-size:.68rem;flex:1" data-target="{textarea_id}">{opts}</select>
+                   <button type="button" class="cm-qbtn" onclick="pbInsert(this)">&#x2193; Insert</button>
+                   <button type="button" class="cm-qbtn" onclick="pbSaveAs(this)">&#x1F4BE; Save as block</button>
+               </div>"""
+
+PROMPT_BLOCK_JS = """
+function pbInsert(btn){
+    var wrap = btn.closest('.pb-picker'); var sel = wrap.querySelector('.pb-select');
+    var opt = sel.selectedOptions[0]; var ta = document.getElementById(sel.dataset.target);
+    if(!ta || !opt || !opt.dataset.text) return;
+    ta.value = (ta.value ? ta.value + '\\n\\n' : '') + opt.dataset.text;
+    ta.dispatchEvent(new Event('input',{bubbles:true}));
+}
+async function pbSaveAs(btn){
+    var wrap = btn.closest('.pb-picker'); var sel = wrap.querySelector('.pb-select');
+    var ta = document.getElementById(sel.dataset.target);
+    var name = prompt('Save current text as block named:'); if(!name) return;
+    var fd = new FormData(); fd.append('name', name); fd.append('text', ta.value); fd.append('target', ta.id);
+    var r = await fetch(wrap.dataset.saveUrl, {method:'POST', body:fd});
+    wrap.outerHTML = await r.text();
+}
+"""
+
